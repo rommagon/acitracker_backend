@@ -77,7 +77,7 @@ def get_drive_service():
         )
 
         # Build Drive service
-        _drive_service = build('google-drive', 'v3', credentials=credentials)
+        _drive_service = build('drive', 'v3', credentials=credentials)
         return _drive_service
 
     except json.JSONDecodeError as e:

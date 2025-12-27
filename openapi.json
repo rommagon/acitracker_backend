@@ -1,0 +1,184 @@
+{
+  "openapi": "3.0.1",
+  "info": {
+    "title": "AciTrack API",
+    "description": "API for accessing latest academic publication reports and data from AciTrack system",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://your-app-name.up.railway.app",
+      "description": "Production server (replace with your actual Railway URL)"
+    }
+  ],
+  "paths": {
+    "/report": {
+      "get": {
+        "operationId": "getLatestReport",
+        "summary": "Get latest academic publications report",
+        "description": "Returns the latest report in Markdown format containing academic publication updates",
+        "responses": {
+          "200": {
+            "description": "Successful response with report content",
+            "content": {
+              "text/markdown": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Report file not found in Google Drive",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/manifest": {
+      "get": {
+        "operationId": "getLatestManifest",
+        "summary": "Get latest publications manifest",
+        "description": "Returns the latest manifest JSON containing metadata about academic publications",
+        "responses": {
+          "200": {
+            "description": "Successful response with manifest data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "Manifest data with publication metadata"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Manifest file not found in Google Drive",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/new": {
+      "get": {
+        "operationId": "getNewPublications",
+        "summary": "Get new publications CSV",
+        "description": "Returns CSV file containing newly discovered academic publications",
+        "responses": {
+          "200": {
+            "description": "Successful response with CSV data",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "CSV file not found in Google Drive",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "healthCheck",
+        "summary": "Health check endpoint",
+        "description": "Verifies service health and Google Drive connectivity",
+        "responses": {
+          "200": {
+            "description": "Service is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "healthy"
+                    },
+                    "drive_connected": {
+                      "type": "boolean",
+                      "example": true
+                    },
+                    "folder_name": {
+                      "type": "string"
+                    },
+                    "folder_id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "Error message"
+          }
+        },
+        "required": ["detail"]
+      }
+    }
+  }
+}

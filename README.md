@@ -80,6 +80,8 @@ Health check endpoint for monitoring service status.
 }
 ```
 
+### Original Endpoints (No caching)
+
 ### `GET /report`
 Returns the latest academic publication report in Markdown format.
 
@@ -100,6 +102,72 @@ Returns CSV of newly discovered publications.
 **Response**: `text/csv`
 
 **File**: `latest_new.csv`
+
+### New Cached Endpoints
+
+The following endpoints use intelligent caching (10-minute TTL by default) and automatically fall back to stale cache if Google Drive is unavailable.
+
+### `GET /api/must-reads`
+Returns must-read publications in JSON format.
+
+**Response**: `application/json`
+
+**File**: `latest_must_reads.json`
+
+**Caching**: Yes (10 min TTL, stale fallback)
+
+### `GET /api/must-reads/md`
+Returns must-read publications in Markdown format.
+
+**Response**: `text/markdown`
+
+**File**: `latest_must_reads.md`
+
+**Caching**: Yes (10 min TTL, stale fallback)
+
+### `GET /api/summaries`
+Returns publication summaries in JSON format.
+
+**Response**: `application/json`
+
+**File**: `latest_summaries.json`
+
+**Caching**: Yes (10 min TTL, stale fallback)
+
+### `GET /api/db/snapshot`
+Download the latest database snapshot as a gzipped SQLite file.
+
+**Response**: `application/gzip` (downloadable)
+
+**File**: `latest_db.sqlite.gz`
+
+**Caching**: Yes (10 min TTL, stale fallback)
+
+### `GET /api/artifacts/status`
+Returns status information for all artifacts including cache status and Drive availability.
+
+**Response**: `application/json`
+
+**Example**:
+```json
+{
+  "status": "ok",
+  "cache_ttl_minutes": 10,
+  "artifacts": {
+    "must_reads_json": {
+      "filename": "latest_must_reads.json",
+      "available": true,
+      "file_id": "1abc...",
+      "cache": {
+        "cached": true,
+        "cached_at": "2025-12-30T10:30:00",
+        "is_valid": true,
+        "ttl_minutes": 10
+      }
+    }
+  }
+}
+```
 
 ## Deployment
 
@@ -138,14 +206,23 @@ acitracker_backend/
 |----------|----------|-------------|
 | `ACITRACK_DRIVE_FOLDER_ID` | Yes | Google Drive folder ID containing output files |
 | `ACITRACK_GCP_SA_JSON` | Yes | Service account JSON as a single-line string |
+| `ACITRACK_CACHE_TTL_MINUTES` | No | Cache TTL in minutes (default: 10) |
 | `PORT` | No | Port to run server (default: 8000, auto-set by platforms) |
 
 ### Required Files in Google Drive
 
 The Google Drive folder must contain these exact filenames:
+
+**Original files:**
 - `latest_report.md`
 - `latest_manifest.json`
 - `latest_new.csv`
+
+**New files (for cached endpoints):**
+- `latest_must_reads.json`
+- `latest_must_reads.md`
+- `latest_summaries.json`
+- `latest_db.sqlite.gz`
 
 ## Security
 
@@ -276,13 +353,169 @@ This is an internal SpotItEarly project. For changes:
 4. Deploy to staging (if available)
 5. Create pull request
 
+## Testing
+
+### Local Testing
+
+After starting the server locally (`python main.py`), test the endpoints:
+
+#### 1. Test Health and Status
+```bash
+# Health check
+curl http://localhost:8000/health
+
+# Check artifacts status (cache info)
+curl http://localhost:8000/api/artifacts/status
+```
+
+#### 2. Test Original Endpoints (No caching)
+```bash
+# Get report (Markdown)
+curl -v http://localhost:8000/report
+
+# Get manifest (JSON)
+curl http://localhost:8000/manifest | jq .
+
+# Get new publications (CSV)
+curl http://localhost:8000/new
+```
+
+#### 3. Test New Cached Endpoints
+
+**Must-reads JSON:**
+```bash
+# First request (cache miss, fetches from Drive)
+curl -v http://localhost:8000/api/must-reads
+
+# Second request within 10 min (cache hit)
+curl -v http://localhost:8000/api/must-reads
+
+# Check Content-Type header is application/json
+curl -I http://localhost:8000/api/must-reads
+```
+
+**Must-reads Markdown:**
+```bash
+# Get must-reads as Markdown
+curl -v http://localhost:8000/api/must-reads/md
+
+# Verify Content-Type: text/markdown
+curl -I http://localhost:8000/api/must-reads/md
+```
+
+**Summaries JSON:**
+```bash
+# Get summaries
+curl http://localhost:8000/api/summaries | jq .
+
+# Verify Content-Type: application/json
+curl -I http://localhost:8000/api/summaries
+```
+
+**Database Snapshot (gzip):**
+```bash
+# Download the gzipped database
+curl -o latest_db.sqlite.gz http://localhost:8000/api/db/snapshot
+
+# Verify it's a valid gzip file
+gunzip -t latest_db.sqlite.gz
+
+# If valid, extract it
+gunzip latest_db.sqlite.gz
+
+# Verify it's a SQLite database
+file latest_db.sqlite
+sqlite3 latest_db.sqlite ".tables"
+
+# Verify Content-Type and Content-Disposition headers
+curl -I http://localhost:8000/api/db/snapshot
+# Should see:
+# Content-Type: application/gzip
+# Content-Disposition: attachment; filename=latest_db.sqlite.gz
+```
+
+#### 4. Test Caching Behavior
+
+```bash
+# First request - should download from Drive
+curl -v http://localhost:8000/api/must-reads 2>&1 | grep "X-Cache"
+
+# Second request (within 10 min) - should use cache
+curl -v http://localhost:8000/api/must-reads 2>&1 | grep "X-Cache"
+
+# Check cache status
+curl http://localhost:8000/api/artifacts/status | jq '.artifacts.must_reads_json.cache'
+```
+
+#### 5. Test Stale Cache Fallback
+
+To test fallback behavior, you can temporarily rename a file in Drive or disconnect from the internet:
+
+```bash
+# After disabling Drive access or internet
+curl -v http://localhost:8000/api/must-reads
+
+# Should see headers:
+# X-Cache-Status: stale
+# X-Error: Drive API unavailable
+```
+
+### Production Testing (Render/Railway)
+
+Replace `http://localhost:8000` with your deployed URL:
+
+```bash
+# Set your deployment URL
+DEPLOY_URL="https://your-app.onrender.com"
+
+# Test health
+curl $DEPLOY_URL/health
+
+# Test new endpoints
+curl $DEPLOY_URL/api/must-reads | jq .
+curl $DEPLOY_URL/api/summaries | jq .
+curl -I $DEPLOY_URL/api/must-reads/md
+curl -o db.sqlite.gz $DEPLOY_URL/api/db/snapshot && gunzip -t db.sqlite.gz
+
+# Check artifacts status
+curl $DEPLOY_URL/api/artifacts/status | jq .
+```
+
+### Verification Checklist for Render Deployment
+
+After deploying to Render, verify:
+
+- [ ] `/health` endpoint returns `"status": "healthy"`
+- [ ] `/api/artifacts/status` shows all files as available
+- [ ] `/api/must-reads` returns valid JSON
+- [ ] `/api/must-reads/md` returns Markdown with `Content-Type: text/markdown`
+- [ ] `/api/summaries` returns valid JSON
+- [ ] `/api/db/snapshot` downloads a valid gzip file
+- [ ] Second request to cached endpoint is faster (check response time)
+- [ ] Cache status shows `"cached": true` after first request
+- [ ] All responses have correct `Content-Type` headers
+
+### Performance Testing
+
+```bash
+# Test response time without cache
+time curl -s http://localhost:8000/api/must-reads > /dev/null
+
+# Test response time with cache (should be faster)
+time curl -s http://localhost:8000/api/must-reads > /dev/null
+
+# Load test (requires apache-bench)
+ab -n 100 -c 10 http://localhost:8000/api/must-reads
+```
+
 ## Support
 
 For issues:
 1. Check [DEPLOYMENT.md](DEPLOYMENT.md) troubleshooting section
 2. Review platform logs (Railway/Render dashboard)
 3. Test `/health` endpoint
-4. Contact team lead
+4. Test `/api/artifacts/status` for cache and Drive connectivity
+5. Contact team lead
 
 ## License
 

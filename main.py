@@ -510,6 +510,47 @@ async def get_new():
     )
 
 
+def upgrade_must_read_schema(item: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Upgrade a must-read item to include new scoring fields with safe defaults.
+
+    This function ensures backwards compatibility by adding missing fields
+    without modifying existing data.
+
+    New fields added:
+    - relevancy_score: float or null
+    - relevancy_reason: string (empty if not present)
+    - credibility_score: float or null
+    - credibility_reason: string (empty if not present)
+    - scored_at: ISO timestamp string or null
+    - scoring_version: string (default "poc_v1" or null)
+    - scoring_model: string or null
+
+    Args:
+        item: Must-read item dictionary
+
+    Returns:
+        Upgraded item with all new fields present
+    """
+    # Define default values for new fields
+    defaults = {
+        "relevancy_score": None,
+        "relevancy_reason": "",
+        "credibility_score": None,
+        "credibility_reason": "",
+        "scored_at": None,
+        "scoring_version": "poc_v1",
+        "scoring_model": None
+    }
+
+    # Add missing fields with defaults (preserves existing values if present)
+    for field, default_value in defaults.items():
+        if field not in item:
+            item[field] = default_value
+
+    return item
+
+
 @app.get("/api/must-reads")
 async def get_must_reads():
     """
@@ -517,15 +558,27 @@ async def get_must_reads():
     Uses caching with 10-minute TTL. Falls back to stale cache if Drive is unavailable.
 
     Returns:
-        latest_must_reads.json content as application/json
+        latest_must_reads.json content as application/json with upgraded schema
     """
     response = get_artifact_with_cache(FILE_NAMES["must_reads_json"], "application/json")
 
     # Parse JSON to return proper JSON response
     try:
         json_data = json.loads(response.body.decode('utf-8'))
+
+        # Schema upgrade: Add new scoring fields to each must-read item
+        # This ensures backwards compatibility with older JSON files in Drive
+        if isinstance(json_data, dict) and "must_reads" in json_data:
+            # Handle structure: {"must_reads": [...]}
+            json_data["must_reads"] = [
+                upgrade_must_read_schema(item) for item in json_data["must_reads"]
+            ]
+        elif isinstance(json_data, list):
+            # Handle structure: [...]
+            json_data = [upgrade_must_read_schema(item) for item in json_data]
+
         return Response(
-            content=json.dumps(json_data),
+            content=json.dumps(json_data, indent=2),
             media_type="application/json",
             headers=dict(response.headers)
         )

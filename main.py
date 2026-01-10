@@ -7,11 +7,11 @@ for consumption by Custom GPT Actions.
 import os
 import json
 import tempfile
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from io import BytesIO
 from datetime import datetime, timedelta
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Response, Query
 from fastapi.middleware.cors import CORSMiddleware
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -510,34 +510,34 @@ async def get_new():
     )
 
 
-def upgrade_must_read_schema(item: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_must_read_item(item: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Upgrade a must-read item to include new scoring fields with safe defaults.
+    Normalize and upgrade a must-read item to include all required fields with safe defaults.
 
-    This function ensures backwards compatibility by adding missing fields
-    without modifying existing data.
-
-    New fields added:
-    - relevancy_score: float or null
-    - relevancy_reason: string (empty if not present)
-    - credibility_score: float or null
-    - credibility_reason: string (empty if not present)
-    - scored_at: ISO timestamp string or null
-    - scoring_version: string (default "poc_v1" or null)
-    - scoring_model: string or null
+    This function ensures backwards compatibility and UI-readiness by:
+    1. Adding missing relevancy and credibility fields
+    2. Normalizing text fields (single-line strings)
+    3. Clamping scores to 0-100 range
+    4. Providing safe defaults for all fields
 
     Args:
         item: Must-read item dictionary
 
     Returns:
-        Upgraded item with all new fields present
+        Normalized item with all required fields present
     """
-    # Define default values for new fields
+    # Define default values for all LLM-generated scoring fields
     defaults = {
+        # Relevancy fields
         "relevancy_score": None,
         "relevancy_reason": "",
+        "signals": {},
+        # Credibility fields
         "credibility_score": None,
         "credibility_reason": "",
+        "credibility_confidence": None,
+        "credibility_signals": {},
+        # Metadata
         "scored_at": None,
         "scoring_version": "poc_v1",
         "scoring_model": None
@@ -548,17 +548,127 @@ def upgrade_must_read_schema(item: Dict[str, Any]) -> Dict[str, Any]:
         if field not in item:
             item[field] = default_value
 
+    # Normalize relevancy_reason: convert to single-line string
+    if item.get("relevancy_reason"):
+        item["relevancy_reason"] = " ".join(str(item["relevancy_reason"]).split())
+
+    # Normalize credibility_reason: convert to single-line string
+    if item.get("credibility_reason"):
+        item["credibility_reason"] = " ".join(str(item["credibility_reason"]).split())
+
+    # Clamp relevancy_score to 0-100 if present
+    if item.get("relevancy_score") is not None:
+        try:
+            score = int(item["relevancy_score"])
+            item["relevancy_score"] = max(0, min(100, score))
+        except (ValueError, TypeError):
+            item["relevancy_score"] = None
+
+    # Clamp credibility_score to 0-100 if present
+    if item.get("credibility_score") is not None:
+        try:
+            score = int(item["credibility_score"])
+            item["credibility_score"] = max(0, min(100, score))
+        except (ValueError, TypeError):
+            item["credibility_score"] = None
+
+    # Ensure signals and credibility_signals are dictionaries
+    if not isinstance(item.get("signals"), dict):
+        item["signals"] = {}
+    if not isinstance(item.get("credibility_signals"), dict):
+        item["credibility_signals"] = {}
+
     return item
 
 
-@app.get("/api/must-reads")
-async def get_must_reads():
+def filter_and_sort_must_reads(
+    items: List[Dict[str, Any]],
+    min_relevance: int = 30,
+    include_zero: bool = False,
+    limit: int = 5
+) -> List[Dict[str, Any]]:
     """
-    Get the latest must-read publications in JSON format.
-    Uses caching with 10-minute TTL. Falls back to stale cache if Drive is unavailable.
+    Filter and sort must-read items for UI consumption.
+
+    Filtering logic:
+    - If include_zero=False: filter out items where relevancy_score is None or < min_relevance
+    - If include_zero=True: no filtering by relevancy_score
+
+    Sorting logic:
+    - Primary: relevancy_score DESC (treat None as -1)
+    - Secondary: published_date DESC (parse ISO timestamps safely)
+
+    Args:
+        items: List of must-read items
+        min_relevance: Minimum relevancy score threshold (default 30)
+        include_zero: If True, include items with null/low relevancy scores (default False)
+        limit: Maximum number of items to return (default 5)
 
     Returns:
-        latest_must_reads.json content as application/json with upgraded schema
+        Filtered and sorted list of items (up to limit)
+    """
+    # Step 1: Filter by relevancy score
+    filtered = items
+    if not include_zero:
+        filtered = [
+            item for item in items
+            if item.get("relevancy_score") is not None and item.get("relevancy_score") >= min_relevance
+        ]
+
+    # Step 2: Sort by relevancy_score DESC, then published_date DESC
+    def sort_key(item):
+        # Primary sort: relevancy_score (treat None as -1)
+        relevancy = item.get("relevancy_score")
+        relevancy_val = relevancy if relevancy is not None else -1
+
+        # Secondary sort: published_date (parse ISO timestamp safely)
+        published_date = item.get("published_date", "")
+        try:
+            # Try to parse ISO timestamp
+            date_obj = datetime.fromisoformat(published_date.replace("Z", "+00:00"))
+            date_val = date_obj.timestamp()
+        except (ValueError, AttributeError):
+            # If parsing fails, use epoch (oldest possible date)
+            date_val = 0
+
+        # Return tuple for sorting: (relevancy DESC, date DESC)
+        return (-relevancy_val, -date_val)
+
+    sorted_items = sorted(filtered, key=sort_key)
+
+    # Step 3: Limit results
+    return sorted_items[:limit]
+
+
+@app.get("/api/must-reads")
+async def get_must_reads(
+    limit: int = Query(default=5, ge=1, le=100, description="Maximum number of items to return"),
+    min_relevance: int = Query(default=30, ge=0, le=100, description="Minimum relevancy score threshold"),
+    include_zero: bool = Query(default=False, description="Include items with null/low relevancy scores"),
+    debug: bool = Query(default=False, description="Include debug information in response")
+):
+    """
+    Get the latest must-read publications in JSON format with filtering and sorting.
+
+    This endpoint returns a UI-ready payload with:
+    - Normalized relevancy and credibility fields
+    - Filtering by relevancy score (configurable)
+    - Sorting by relevancy_score DESC, then published_date DESC
+    - Limited to top N items (default 5)
+
+    Query Parameters:
+    - limit: Maximum number of items to return (default 5, max 100)
+    - min_relevance: Minimum relevancy score threshold (default 30, 0-100)
+    - include_zero: If true, ignore min_relevance filter (default false)
+    - debug: If true, include debug metadata in response (default false)
+
+    Returns:
+        Filtered, sorted, and normalized must-reads with all required fields
+
+    Examples:
+    - /api/must-reads?limit=5&min_relevance=40
+    - /api/must-reads?include_zero=true&limit=10
+    - /api/must-reads?debug=true
     """
     response = get_artifact_with_cache(FILE_NAMES["must_reads_json"], "application/json")
 
@@ -566,19 +676,55 @@ async def get_must_reads():
     try:
         json_data = json.loads(response.body.decode('utf-8'))
 
-        # Schema upgrade: Add new scoring fields to each must-read item
-        # This ensures backwards compatibility with older JSON files in Drive
+        # Extract items from the response structure
+        items = []
+        metadata = {}
+
         if isinstance(json_data, dict) and "must_reads" in json_data:
-            # Handle structure: {"must_reads": [...]}
-            json_data["must_reads"] = [
-                upgrade_must_read_schema(item) for item in json_data["must_reads"]
-            ]
+            # Handle structure: {"must_reads": [...], "generated_at": ..., etc.}
+            items = json_data.get("must_reads", [])
+            # Preserve top-level metadata
+            metadata = {k: v for k, v in json_data.items() if k != "must_reads"}
         elif isinstance(json_data, list):
             # Handle structure: [...]
-            json_data = [upgrade_must_read_schema(item) for item in json_data]
+            items = json_data
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Unexpected JSON structure in must-reads file"
+            )
+
+        # Step 1: Normalize all items (add missing fields, clamp scores, etc.)
+        normalized_items = [normalize_must_read_item(item) for item in items]
+
+        # Step 2: Filter and sort
+        filtered_sorted = filter_and_sort_must_reads(
+            normalized_items,
+            min_relevance=min_relevance,
+            include_zero=include_zero,
+            limit=limit
+        )
+
+        # Step 3: Build response payload
+        result = {
+            "must_reads": filtered_sorted,
+            **metadata  # Include original metadata (generated_at, window_days, etc.)
+        }
+
+        # Add debug info if requested
+        if debug:
+            result["_debug"] = {
+                "total_items_before_filter": len(normalized_items),
+                "total_items_after_filter": len(filtered_sorted),
+                "query_params": {
+                    "limit": limit,
+                    "min_relevance": min_relevance,
+                    "include_zero": include_zero
+                }
+            }
 
         return Response(
-            content=json.dumps(json_data, indent=2),
+            content=json.dumps(result, indent=2),
             media_type="application/json",
             headers=dict(response.headers)
         )

@@ -323,9 +323,9 @@ def get_latest_run(mode: str = "daily") -> Dict[str, Any]:
     Get the latest run information for a given mode (daily or weekly).
 
     This function:
-    1. Reads manifests/<mode>/latest.json to get the latest run_id
-    2. Loads the full manifest from manifests/<mode>/<run_id>.json
-    3. Returns resolved paths for all output files
+    1. Reads Manifests/<Mode>/latest.json to get the latest run_id and Drive references
+    2. Loads the full manifest using drive_manifest_path or drive_manifest_file_id if available
+    3. Returns manifest with Drive file IDs and paths for direct access
 
     Args:
         mode: Either "daily" or "weekly" (default: "daily")
@@ -333,8 +333,9 @@ def get_latest_run(mode: str = "daily") -> Dict[str, Any]:
     Returns:
         Dictionary with:
         - run_id: The latest run ID
-        - manifest: The full manifest data
-        - output_paths: Resolved file paths for must_reads.json, report.md, new.csv, summaries.json
+        - manifest: The full manifest data (includes drive_file_ids, drive_output_paths)
+        - latest_pointer: The latest.json data for reference
+        - mode: The run mode
 
     Raises:
         HTTPException: 503 if latest.json or manifest is missing/unreadable
@@ -347,21 +348,22 @@ def get_latest_run(mode: str = "daily") -> Dict[str, Any]:
 
     try:
         service = get_drive_service()
+        mode_capitalized = mode.capitalize()  # "daily" -> "Daily", "weekly" -> "Weekly"
 
-        # Step 1: Find manifests folder
-        manifests_folder_id = find_folder_in_parent(MANIFESTS_FOLDER, DRIVE_FOLDER_ID)
+        # Step 1: Find Manifests folder
+        manifests_folder_id = find_folder_in_parent("Manifests", DRIVE_FOLDER_ID)
         if not manifests_folder_id:
             raise HTTPException(
                 status_code=503,
                 detail=f"Manifests folder not found in Drive"
             )
 
-        # Step 2: Find mode folder (daily or weekly)
-        mode_folder_id = find_folder_in_parent(mode, manifests_folder_id)
+        # Step 2: Find mode folder (Daily or Weekly)
+        mode_folder_id = find_folder_in_parent(mode_capitalized, manifests_folder_id)
         if not mode_folder_id:
             raise HTTPException(
                 status_code=503,
-                detail=f"No manifests folder for mode={mode}"
+                detail=f"No Manifests/{mode_capitalized} folder for mode={mode}"
             )
 
         # Step 3: Read latest.json
@@ -382,31 +384,45 @@ def get_latest_run(mode: str = "daily") -> Dict[str, Any]:
                 detail=f"Invalid latest.json for mode={mode}: missing run_id"
             )
 
-        # Step 4: Read manifest file for this run
-        manifest_filename = f"{run_id}.json"
-        manifest_file_id = find_file_in_folder_by_id(manifest_filename, mode_folder_id)
-        if not manifest_file_id:
-            raise HTTPException(
-                status_code=503,
-                detail=f"Manifest file not found: manifests/{mode}/{manifest_filename}"
-            )
+        # Step 4: Load manifest - prefer drive_manifest_path/file_id if available
+        manifest_content = None
 
-        manifest_content = download_file_content(manifest_file_id)
+        # Try drive_manifest_file_id first (fastest - direct file access)
+        if "drive_manifest_file_id" in latest_data:
+            try:
+                manifest_file_id = latest_data["drive_manifest_file_id"]
+                manifest_content = download_file_content(manifest_file_id)
+                logger.info(f"Loaded manifest via drive_manifest_file_id: {manifest_file_id}")
+            except Exception as e:
+                logger.warning(f"Failed to load manifest by file ID, trying path: {e}")
+
+        # Fallback to drive_manifest_path (navigate folders)
+        if not manifest_content and "drive_manifest_path" in latest_data:
+            try:
+                drive_manifest_path = latest_data["drive_manifest_path"]
+                manifest_content = get_output_file_content(drive_manifest_path)
+                logger.info(f"Loaded manifest via drive_manifest_path: {drive_manifest_path}")
+            except Exception as e:
+                logger.warning(f"Failed to load manifest by Drive path, trying local path: {e}")
+
+        # Final fallback to local manifest path (manifests/<mode>/<run_id>.json)
+        if not manifest_content:
+            manifest_filename = f"{run_id}.json"
+            manifest_file_id = find_file_in_folder_by_id(manifest_filename, mode_folder_id)
+            if not manifest_file_id:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Manifest file not found: Manifests/{mode_capitalized}/{manifest_filename}"
+                )
+            manifest_content = download_file_content(manifest_file_id)
+            logger.info(f"Loaded manifest via fallback path: {manifest_filename}")
+
         manifest_data = json.loads(manifest_content.decode('utf-8'))
-
-        # Step 5: Resolve output paths
-        # Output files are in outputs/<mode>/<run_id>/
-        output_paths = {
-            "must_reads": f"outputs/{mode}/{run_id}/must_reads.json",
-            "report": f"outputs/{mode}/{run_id}/report.md",
-            "new": f"outputs/{mode}/{run_id}/new.csv",
-            "summaries": f"outputs/{mode}/{run_id}/summaries.json"
-        }
 
         return {
             "run_id": run_id,
             "manifest": manifest_data,
-            "output_paths": output_paths,
+            "latest_pointer": latest_data,
             "mode": mode
         }
 
@@ -465,6 +481,106 @@ def find_file_in_folder_by_id(filename: str, folder_id: str) -> Optional[str]:
     except HttpError as e:
         print(f"Error finding file '{filename}' in folder {folder_id}: {e}")
         return None
+
+
+def resolve_and_get_output_file(
+    file_key: str,
+    latest_run: Dict[str, Any],
+    debug: bool = False
+) -> tuple[bytes, Optional[Dict[str, str]]]:
+    """
+    Resolve and retrieve output file content with fallback priority:
+    1. drive_file_ids[file_key] (fastest - direct file access)
+    2. drive_output_paths[file_key] (navigate Drive folders)
+    3. output_paths[file_key] (legacy local path fallback)
+
+    Args:
+        file_key: Key name (e.g., "must_reads", "report", "new", "summaries")
+        latest_run: Dictionary from get_latest_run() containing manifest and latest_pointer
+        debug: If True, return resolution metadata
+
+    Returns:
+        Tuple of (file_content, debug_info)
+        debug_info contains: {"resolution_method": str, "resolved_path": str}
+
+    Raises:
+        HTTPException: 503 if file cannot be found via any method
+    """
+    manifest = latest_run["manifest"]
+    latest_pointer = latest_run.get("latest_pointer", {})
+    mode = latest_run["mode"]
+    run_id = latest_run["run_id"]
+
+    debug_info = None
+    content = None
+
+    # Priority 1: Try drive_file_ids (fastest - direct file ID access)
+    drive_file_ids = latest_pointer.get("drive_file_ids") or manifest.get("drive_file_ids")
+    if drive_file_ids and file_key in drive_file_ids:
+        try:
+            file_id = drive_file_ids[file_key]
+            content = download_file_content(file_id)
+            debug_info = {
+                "resolution_method": "drive_file_id",
+                "resolved_path": file_id,
+                "file_key": file_key
+            }
+            logger.info(f"Resolved {file_key} via drive_file_id: {file_id}")
+        except Exception as e:
+            logger.warning(f"Failed to load {file_key} by file ID, trying Drive path: {e}")
+
+    # Priority 2: Try drive_output_paths (navigate Drive folders)
+    if not content:
+        drive_output_paths = latest_pointer.get("drive_output_paths") or manifest.get("drive_output_paths")
+        if drive_output_paths and file_key in drive_output_paths:
+            try:
+                drive_path = drive_output_paths[file_key]
+                content = get_output_file_content(drive_path)
+                debug_info = {
+                    "resolution_method": "drive_output_path",
+                    "resolved_path": drive_path,
+                    "file_key": file_key
+                }
+                logger.info(f"Resolved {file_key} via drive_output_path: {drive_path}")
+            except Exception as e:
+                logger.warning(f"Failed to load {file_key} by Drive path, trying local path: {e}")
+
+    # Priority 3: Fallback to local output_paths (legacy)
+    if not content:
+        output_paths = manifest.get("output_paths") or manifest.get("local_output_paths", {})
+
+        # Map file_key to output_paths key
+        key_mapping = {
+            "must_reads": "must_reads_json",
+            "report": "report_md",
+            "new": "new_csv",
+            "summaries": "summaries_json"
+        }
+
+        output_key = key_mapping.get(file_key, file_key)
+        if output_key in output_paths:
+            try:
+                local_path = output_paths[output_key]
+                # Convert local path to Drive path (e.g., data/outputs/daily/run_id/file.json -> outputs/daily/run_id/file.json)
+                # Strip "data/" prefix if present
+                drive_path = local_path.replace("data/", "")
+                content = get_output_file_content(drive_path)
+                debug_info = {
+                    "resolution_method": "local_fallback",
+                    "resolved_path": drive_path,
+                    "file_key": file_key
+                }
+                logger.info(f"Resolved {file_key} via local fallback: {drive_path}")
+            except Exception as e:
+                logger.error(f"Failed to load {file_key} via all methods: {e}")
+
+    if not content:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Output file '{file_key}' not found via any resolution method for mode={mode}, run_id={run_id}"
+        )
+
+    return content, debug_info if debug else None
 
 
 def get_output_file_content(output_path: str) -> bytes:
@@ -700,32 +816,40 @@ async def health_check():
 
 @app.get("/report")
 async def get_report(
-    mode: str = Query(default="daily", description="Run mode: daily or weekly")
+    mode: str = Query(default="daily", description="Run mode: daily or weekly"),
+    debug: bool = Query(default=False, description="Include resolution debug info in headers")
 ):
     """
     Get the latest report in Markdown format for a specific mode.
 
-    This endpoint loads the report.md for the latest run of the specified mode
-    using the output_paths from the manifest/latest pointer.
+    This endpoint loads the report.md for the latest run using:
+    1. drive_file_ids["report"] (fastest)
+    2. drive_output_paths["report"] (Drive folder navigation)
+    3. output_paths fallback (legacy)
 
     Query Parameters:
     - mode: Either "daily" or "weekly" (default: "daily")
+    - debug: If true, add X-Resolution-Method header
 
     Returns:
         report.md content as text/markdown
 
     Examples:
     - /report?mode=daily
-    - /report?mode=weekly
+    - /report?mode=weekly&debug=true
     """
     latest_run = get_latest_run(mode)
-    report_path = latest_run["output_paths"]["report"]
+    content, debug_info = resolve_and_get_output_file("report", latest_run, debug=debug)
 
-    content = get_output_file_content(report_path)
+    headers = {}
+    if debug and debug_info:
+        headers["X-Resolution-Method"] = debug_info["resolution_method"]
+        headers["X-Resolved-Path"] = debug_info["resolved_path"]
 
     return Response(
         content=content,
-        media_type="text/markdown"
+        media_type="text/markdown",
+        headers=headers
     )
 
 
@@ -756,32 +880,40 @@ async def get_manifest(
 
 @app.get("/new")
 async def get_new(
-    mode: str = Query(default="daily", description="Run mode: daily or weekly")
+    mode: str = Query(default="daily", description="Run mode: daily or weekly"),
+    debug: bool = Query(default=False, description="Include resolution debug info in headers")
 ):
     """
     Get the latest new publications in CSV format for a specific mode.
 
-    This endpoint loads the new.csv for the latest run of the specified mode.
+    This endpoint loads the new.csv for the latest run using:
+    1. drive_file_ids["new"] (fastest)
+    2. drive_output_paths["new"] (Drive folder navigation)
+    3. output_paths fallback (legacy)
 
     Query Parameters:
     - mode: Either "daily" or "weekly" (default: "daily")
+    - debug: If true, add X-Resolution-Method header
 
     Returns:
         new.csv content as text/csv
 
     Examples:
     - /new?mode=daily
-    - /new?mode=weekly
+    - /new?mode=weekly&debug=true
     """
     latest_run = get_latest_run(mode)
-    new_path = latest_run["output_paths"]["new"]
+    content, debug_info = resolve_and_get_output_file("new", latest_run, debug=debug)
 
-    content = get_output_file_content(new_path)
+    headers = {"Content-Disposition": f"inline; filename=new_{mode}.csv"}
+    if debug and debug_info:
+        headers["X-Resolution-Method"] = debug_info["resolution_method"]
+        headers["X-Resolved-Path"] = debug_info["resolved_path"]
 
     return Response(
         content=content,
         media_type="text/csv",
-        headers={"Content-Disposition": f"inline; filename=new_{mode}.csv"}
+        headers=headers
     )
 
 
@@ -931,13 +1063,14 @@ async def get_must_reads(
     - Filtering by relevancy score (configurable)
     - Sorting by relevancy_score DESC, then published_date DESC
     - Limited to top N items (default 5)
+    - Uses drive_file_ids for fastest access
 
     Query Parameters:
     - mode: Either "daily" or "weekly" (default: "daily")
     - limit: Maximum number of items to return (default 5, max 100)
     - min_relevance: Minimum relevancy score threshold (default 30, 0-100)
     - include_zero: If true, ignore min_relevance filter (default false)
-    - debug: If true, include debug metadata in response (default false)
+    - debug: If true, include debug metadata (resolution method, run_id, etc)
 
     Returns:
         Filtered, sorted, and normalized must-reads with all required fields
@@ -948,9 +1081,7 @@ async def get_must_reads(
     - /api/must-reads?mode=daily&debug=true
     """
     latest_run = get_latest_run(mode)
-    must_reads_path = latest_run["output_paths"]["must_reads"]
-
-    content = get_output_file_content(must_reads_path)
+    content, resolution_info = resolve_and_get_output_file("must_reads", latest_run, debug=debug)
 
     # Parse JSON to return proper JSON response
     try:
@@ -1002,7 +1133,8 @@ async def get_must_reads(
                     "include_zero": include_zero,
                     "mode": mode
                 },
-                "run_id": latest_run["run_id"]
+                "run_id": latest_run["run_id"],
+                "resolution": resolution_info  # Show which resolution method was used
             }
 
         return Response(
@@ -1030,34 +1162,44 @@ async def get_must_reads_md():
 
 @app.get("/api/summaries")
 async def get_summaries(
-    mode: str = Query(default="daily", description="Run mode: daily or weekly")
+    mode: str = Query(default="daily", description="Run mode: daily or weekly"),
+    debug: bool = Query(default=False, description="Include resolution debug info in headers")
 ):
     """
     Get the latest publication summaries in JSON format for a specific mode.
 
-    This endpoint loads the summaries.json for the latest run of the specified mode.
+    This endpoint loads the summaries.json for the latest run using:
+    1. drive_file_ids["summaries"] (fastest)
+    2. drive_output_paths["summaries"] (Drive folder navigation)
+    3. output_paths fallback (legacy)
 
     Query Parameters:
     - mode: Either "daily" or "weekly" (default: "daily")
+    - debug: If true, add X-Resolution-Method header
 
     Returns:
         summaries.json content as application/json
 
     Examples:
     - /api/summaries?mode=daily
-    - /api/summaries?mode=weekly
+    - /api/summaries?mode=weekly&debug=true
     """
     latest_run = get_latest_run(mode)
-    summaries_path = latest_run["output_paths"]["summaries"]
-
-    content = get_output_file_content(summaries_path)
+    content, debug_info = resolve_and_get_output_file("summaries", latest_run, debug=debug)
 
     # Parse JSON to return proper JSON response
     try:
         json_data = json.loads(content.decode('utf-8'))
+
+        headers = {}
+        if debug and debug_info:
+            headers["X-Resolution-Method"] = debug_info["resolution_method"]
+            headers["X-Resolved-Path"] = debug_info["resolved_path"]
+
         return Response(
             content=json.dumps(json_data),
-            media_type="application/json"
+            media_type="application/json",
+            headers=headers
         )
     except json.JSONDecodeError as e:
         raise HTTPException(

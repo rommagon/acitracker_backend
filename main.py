@@ -40,7 +40,7 @@ app.add_middleware(
 DRIVE_FOLDER_ID = os.getenv("ACITRACK_DRIVE_FOLDER_ID")
 GCP_SA_JSON = os.getenv("ACITRACK_GCP_SA_JSON")
 
-# File names to search for in Google Drive
+# Legacy file names to search for in Google Drive (deprecated)
 FILE_NAMES = {
     "report": "latest_report.md",
     "manifest": "latest_manifest.json",
@@ -50,6 +50,10 @@ FILE_NAMES = {
     "summaries": "latest_summaries.json",
     "db_snapshot": "latest_db.sqlite.gz"
 }
+
+# New manifest-based folder structure
+MANIFESTS_FOLDER = "manifests"
+OUTPUTS_FOLDER = "outputs"
 
 # Global Drive service instance and drive ID cache
 _drive_service = None
@@ -271,6 +275,257 @@ def set_cache(filename: str, content: bytes, file_id: str):
     }
 
 
+def find_folder_in_parent(folder_name: str, parent_id: str) -> Optional[str]:
+    """
+    Find a folder by exact name within a parent folder.
+
+    Args:
+        folder_name: Name of the folder to find
+        parent_id: Parent folder ID to search in
+
+    Returns:
+        Folder ID if found, None otherwise
+    """
+    try:
+        service = get_drive_service()
+        drive_id = get_drive_id()
+
+        query = f"name='{folder_name}' and '{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+
+        request_params = {
+            'q': query,
+            'spaces': 'drive',
+            'fields': 'files(id, name)',
+            'pageSize': 1,
+            'supportsAllDrives': True,
+            'includeItemsFromAllDrives': True
+        }
+
+        if drive_id:
+            request_params['corpora'] = 'drive'
+            request_params['driveId'] = drive_id
+
+        results = service.files().list(**request_params).execute()
+        files = results.get('files', [])
+
+        if files:
+            return files[0]['id']
+
+        return None
+
+    except HttpError as e:
+        print(f"Error finding folder '{folder_name}': {e}")
+        return None
+
+
+def get_latest_run(mode: str = "daily") -> Dict[str, Any]:
+    """
+    Get the latest run information for a given mode (daily or weekly).
+
+    This function:
+    1. Reads manifests/<mode>/latest.json to get the latest run_id
+    2. Loads the full manifest from manifests/<mode>/<run_id>.json
+    3. Returns resolved paths for all output files
+
+    Args:
+        mode: Either "daily" or "weekly" (default: "daily")
+
+    Returns:
+        Dictionary with:
+        - run_id: The latest run ID
+        - manifest: The full manifest data
+        - output_paths: Resolved file paths for must_reads.json, report.md, new.csv, summaries.json
+
+    Raises:
+        HTTPException: 503 if latest.json or manifest is missing/unreadable
+    """
+    if mode not in ["daily", "weekly"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid mode '{mode}'. Must be 'daily' or 'weekly'"
+        )
+
+    try:
+        service = get_drive_service()
+
+        # Step 1: Find manifests folder
+        manifests_folder_id = find_folder_in_parent(MANIFESTS_FOLDER, DRIVE_FOLDER_ID)
+        if not manifests_folder_id:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Manifests folder not found in Drive"
+            )
+
+        # Step 2: Find mode folder (daily or weekly)
+        mode_folder_id = find_folder_in_parent(mode, manifests_folder_id)
+        if not mode_folder_id:
+            raise HTTPException(
+                status_code=503,
+                detail=f"No manifests folder for mode={mode}"
+            )
+
+        # Step 3: Read latest.json
+        latest_file_id = find_file_in_folder_by_id("latest.json", mode_folder_id)
+        if not latest_file_id:
+            raise HTTPException(
+                status_code=503,
+                detail=f"No latest pointer for mode={mode}"
+            )
+
+        latest_content = download_file_content(latest_file_id)
+        latest_data = json.loads(latest_content.decode('utf-8'))
+
+        run_id = latest_data.get("run_id")
+        if not run_id:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Invalid latest.json for mode={mode}: missing run_id"
+            )
+
+        # Step 4: Read manifest file for this run
+        manifest_filename = f"{run_id}.json"
+        manifest_file_id = find_file_in_folder_by_id(manifest_filename, mode_folder_id)
+        if not manifest_file_id:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Manifest file not found: manifests/{mode}/{manifest_filename}"
+            )
+
+        manifest_content = download_file_content(manifest_file_id)
+        manifest_data = json.loads(manifest_content.decode('utf-8'))
+
+        # Step 5: Resolve output paths
+        # Output files are in outputs/<mode>/<run_id>/
+        output_paths = {
+            "must_reads": f"outputs/{mode}/{run_id}/must_reads.json",
+            "report": f"outputs/{mode}/{run_id}/report.md",
+            "new": f"outputs/{mode}/{run_id}/new.csv",
+            "summaries": f"outputs/{mode}/{run_id}/summaries.json"
+        }
+
+        return {
+            "run_id": run_id,
+            "manifest": manifest_data,
+            "output_paths": output_paths,
+            "mode": mode
+        }
+
+    except HTTPException:
+        raise
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Invalid JSON in manifest for mode={mode}: {e}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to resolve latest run for mode={mode}: {e}"
+        )
+
+
+def find_file_in_folder_by_id(filename: str, folder_id: str) -> Optional[str]:
+    """
+    Find a file by exact name in a specific folder ID.
+
+    Args:
+        filename: Exact name of the file to find
+        folder_id: Folder ID to search in
+
+    Returns:
+        File ID if found, None otherwise
+    """
+    try:
+        service = get_drive_service()
+        drive_id = get_drive_id()
+
+        query = f"name='{filename}' and '{folder_id}' in parents and trashed=false"
+
+        request_params = {
+            'q': query,
+            'spaces': 'drive',
+            'fields': 'files(id, name)',
+            'pageSize': 1,
+            'supportsAllDrives': True,
+            'includeItemsFromAllDrives': True
+        }
+
+        if drive_id:
+            request_params['corpora'] = 'drive'
+            request_params['driveId'] = drive_id
+
+        results = service.files().list(**request_params).execute()
+        files = results.get('files', [])
+
+        if files:
+            return files[0]['id']
+
+        return None
+
+    except HttpError as e:
+        print(f"Error finding file '{filename}' in folder {folder_id}: {e}")
+        return None
+
+
+def get_output_file_content(output_path: str) -> bytes:
+    """
+    Get content of an output file by path (e.g., outputs/daily/run_123/must_reads.json).
+
+    This function navigates the folder hierarchy in Drive to find and download the file.
+
+    Args:
+        output_path: Path like "outputs/daily/run_123/must_reads.json"
+
+    Returns:
+        File content as bytes
+
+    Raises:
+        HTTPException: 503 if file not found
+    """
+    try:
+        service = get_drive_service()
+
+        # Split path into components
+        parts = output_path.split('/')
+        if len(parts) < 2:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Invalid output path: {output_path}"
+            )
+
+        # Navigate folder hierarchy
+        current_folder_id = DRIVE_FOLDER_ID
+
+        # Navigate through all folders in the path
+        for i, part in enumerate(parts[:-1]):  # All parts except filename
+            folder_id = find_folder_in_parent(part, current_folder_id)
+            if not folder_id:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Folder not found in path: {'/'.join(parts[:i+1])}"
+                )
+            current_folder_id = folder_id
+
+        # Find the file in the final folder
+        filename = parts[-1]
+        file_id = find_file_in_folder_by_id(filename, current_folder_id)
+        if not file_id:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Output file not found: {output_path}"
+            )
+
+        return download_file_content(file_id)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to retrieve output file {output_path}: {e}"
+        )
+
+
 def get_artifact_with_cache(filename: str, media_type: str = "application/json") -> Response:
     """
     Get artifact from Drive with caching. Falls back to cache if Drive fails.
@@ -349,17 +604,28 @@ async def root():
     """
     return {
         "name": "AciTrack API",
-        "version": "1.1.0",
-        "description": "API for accessing latest academic publication reports",
+        "version": "2.0.0",
+        "description": "API for accessing latest academic publication reports with daily/weekly mode support",
+        "mode_support": {
+            "description": "Most endpoints support ?mode=daily|weekly parameter",
+            "default": "daily",
+            "valid_values": ["daily", "weekly"]
+        },
         "endpoints": {
-            "/report": "Get latest report (Markdown)",
-            "/manifest": "Get latest manifest (JSON)",
-            "/new": "Get latest new publications (CSV)",
-            "/api/must-reads": "Get must-read publications (JSON)",
+            "/report": "Get latest report (Markdown) - supports ?mode=daily|weekly",
+            "/manifest": "Get latest manifest (JSON) - supports ?mode=daily|weekly",
+            "/new": "Get latest new publications (CSV) - supports ?mode=daily|weekly",
+            "/api/must-reads": "Get must-read publications (JSON) - supports ?mode=daily|weekly",
             "/api/must-reads/md": "Get must-read publications (Markdown)",
-            "/api/summaries": "Get publication summaries (JSON)",
+            "/api/summaries": "Get publication summaries (JSON) - supports ?mode=daily|weekly",
             "/api/db/snapshot": "Download database snapshot (gzip)",
             "/api/artifacts/status": "Get artifacts status and cache info"
+        },
+        "examples": {
+            "daily_must_reads": "/api/must-reads?mode=daily",
+            "weekly_must_reads": "/api/must-reads?mode=weekly",
+            "daily_report": "/report?mode=daily",
+            "weekly_manifest": "/manifest?mode=weekly"
         },
         "docs": "/docs"
     }
@@ -433,22 +699,29 @@ async def health_check():
 
 
 @app.get("/report")
-async def get_report():
+async def get_report(
+    mode: str = Query(default="daily", description="Run mode: daily or weekly")
+):
     """
-    Get the latest report in Markdown format.
+    Get the latest report in Markdown format for a specific mode.
+
+    This endpoint loads the report.md for the latest run of the specified mode
+    using the output_paths from the manifest/latest pointer.
+
+    Query Parameters:
+    - mode: Either "daily" or "weekly" (default: "daily")
 
     Returns:
-        latest_report.md content as text/markdown
+        report.md content as text/markdown
+
+    Examples:
+    - /report?mode=daily
+    - /report?mode=weekly
     """
-    file_id = find_file_in_folder(FILE_NAMES["report"])
+    latest_run = get_latest_run(mode)
+    report_path = latest_run["output_paths"]["report"]
 
-    if not file_id:
-        raise HTTPException(
-            status_code=404,
-            detail=f"File '{FILE_NAMES['report']}' not found in Google Drive folder"
-        )
-
-    content = download_file_content(file_id)
+    content = get_output_file_content(report_path)
 
     return Response(
         content=content,
@@ -457,56 +730,58 @@ async def get_report():
 
 
 @app.get("/manifest")
-async def get_manifest():
+async def get_manifest(
+    mode: str = Query(default="daily", description="Run mode: daily or weekly")
+):
     """
-    Get the latest manifest in JSON format.
+    Get the latest manifest in JSON format for a specific mode.
+
+    This endpoint loads the manifest for the latest run of the specified mode:
+    1. Reads manifests/<mode>/latest.json to get the latest run_id
+    2. Loads and returns manifests/<mode>/<run_id>.json
+
+    Query Parameters:
+    - mode: Either "daily" or "weekly" (default: "daily")
 
     Returns:
-        latest_manifest.json content as application/json
+        Manifest JSON for the latest run of the specified mode
+
+    Examples:
+    - /manifest?mode=daily
+    - /manifest?mode=weekly
     """
-    file_id = find_file_in_folder(FILE_NAMES["manifest"])
-
-    if not file_id:
-        raise HTTPException(
-            status_code=404,
-            detail=f"File '{FILE_NAMES['manifest']}' not found in Google Drive folder"
-        )
-
-    content = download_file_content(file_id)
-
-    # Parse and return as JSON to ensure valid JSON response
-    try:
-        json_data = json.loads(content.decode('utf-8'))
-        return json_data
-    except json.JSONDecodeError as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Invalid JSON in manifest file: {e}"
-        )
+    latest_run = get_latest_run(mode)
+    return latest_run["manifest"]
 
 
 @app.get("/new")
-async def get_new():
+async def get_new(
+    mode: str = Query(default="daily", description="Run mode: daily or weekly")
+):
     """
-    Get the latest new publications in CSV format.
+    Get the latest new publications in CSV format for a specific mode.
+
+    This endpoint loads the new.csv for the latest run of the specified mode.
+
+    Query Parameters:
+    - mode: Either "daily" or "weekly" (default: "daily")
 
     Returns:
-        latest_new.csv content as text/csv
+        new.csv content as text/csv
+
+    Examples:
+    - /new?mode=daily
+    - /new?mode=weekly
     """
-    file_id = find_file_in_folder(FILE_NAMES["new"])
+    latest_run = get_latest_run(mode)
+    new_path = latest_run["output_paths"]["new"]
 
-    if not file_id:
-        raise HTTPException(
-            status_code=404,
-            detail=f"File '{FILE_NAMES['new']}' not found in Google Drive folder"
-        )
-
-    content = download_file_content(file_id)
+    content = get_output_file_content(new_path)
 
     return Response(
         content=content,
         media_type="text/csv",
-        headers={"Content-Disposition": "inline; filename=latest_new.csv"}
+        headers={"Content-Disposition": f"inline; filename=new_{mode}.csv"}
     )
 
 
@@ -642,6 +917,7 @@ def filter_and_sort_must_reads(
 
 @app.get("/api/must-reads")
 async def get_must_reads(
+    mode: str = Query(default="daily", description="Run mode: daily or weekly"),
     limit: int = Query(default=5, ge=1, le=100, description="Maximum number of items to return"),
     min_relevance: int = Query(default=30, ge=0, le=100, description="Minimum relevancy score threshold"),
     include_zero: bool = Query(default=False, description="Include items with null/low relevancy scores"),
@@ -657,6 +933,7 @@ async def get_must_reads(
     - Limited to top N items (default 5)
 
     Query Parameters:
+    - mode: Either "daily" or "weekly" (default: "daily")
     - limit: Maximum number of items to return (default 5, max 100)
     - min_relevance: Minimum relevancy score threshold (default 30, 0-100)
     - include_zero: If true, ignore min_relevance filter (default false)
@@ -666,15 +943,18 @@ async def get_must_reads(
         Filtered, sorted, and normalized must-reads with all required fields
 
     Examples:
-    - /api/must-reads?limit=5&min_relevance=40
-    - /api/must-reads?include_zero=true&limit=10
-    - /api/must-reads?debug=true
+    - /api/must-reads?mode=daily&limit=5&min_relevance=40
+    - /api/must-reads?mode=weekly&include_zero=true&limit=10
+    - /api/must-reads?mode=daily&debug=true
     """
-    response = get_artifact_with_cache(FILE_NAMES["must_reads_json"], "application/json")
+    latest_run = get_latest_run(mode)
+    must_reads_path = latest_run["output_paths"]["must_reads"]
+
+    content = get_output_file_content(must_reads_path)
 
     # Parse JSON to return proper JSON response
     try:
-        json_data = json.loads(response.body.decode('utf-8'))
+        json_data = json.loads(content.decode('utf-8'))
 
         # Extract items from the response structure
         items = []
@@ -719,14 +999,15 @@ async def get_must_reads(
                 "query_params": {
                     "limit": limit,
                     "min_relevance": min_relevance,
-                    "include_zero": include_zero
-                }
+                    "include_zero": include_zero,
+                    "mode": mode
+                },
+                "run_id": latest_run["run_id"]
             }
 
         return Response(
             content=json.dumps(result, indent=2),
-            media_type="application/json",
-            headers=dict(response.headers)
+            media_type="application/json"
         )
     except json.JSONDecodeError as e:
         raise HTTPException(
@@ -748,23 +1029,35 @@ async def get_must_reads_md():
 
 
 @app.get("/api/summaries")
-async def get_summaries():
+async def get_summaries(
+    mode: str = Query(default="daily", description="Run mode: daily or weekly")
+):
     """
-    Get the latest publication summaries in JSON format.
-    Uses caching with 10-minute TTL. Falls back to stale cache if Drive is unavailable.
+    Get the latest publication summaries in JSON format for a specific mode.
+
+    This endpoint loads the summaries.json for the latest run of the specified mode.
+
+    Query Parameters:
+    - mode: Either "daily" or "weekly" (default: "daily")
 
     Returns:
-        latest_summaries.json content as application/json
+        summaries.json content as application/json
+
+    Examples:
+    - /api/summaries?mode=daily
+    - /api/summaries?mode=weekly
     """
-    response = get_artifact_with_cache(FILE_NAMES["summaries"], "application/json")
+    latest_run = get_latest_run(mode)
+    summaries_path = latest_run["output_paths"]["summaries"]
+
+    content = get_output_file_content(summaries_path)
 
     # Parse JSON to return proper JSON response
     try:
-        json_data = json.loads(response.body.decode('utf-8'))
+        json_data = json.loads(content.decode('utf-8'))
         return Response(
             content=json.dumps(json_data),
-            media_type="application/json",
-            headers=dict(response.headers)
+            media_type="application/json"
         )
     except json.JSONDecodeError as e:
         raise HTTPException(

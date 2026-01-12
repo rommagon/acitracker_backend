@@ -6,6 +6,7 @@ for consumption by Custom GPT Actions.
 
 import os
 import json
+import logging
 import tempfile
 from typing import Optional, Dict, Any, List
 from io import BytesIO
@@ -17,6 +18,13 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from googleapiclient.errors import HttpError
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
 app = FastAPI(

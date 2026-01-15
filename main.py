@@ -498,9 +498,10 @@ def resolve_and_get_output_file(
 ) -> tuple[bytes, Optional[Dict[str, str]]]:
     """
     Resolve and retrieve output file content with fallback priority:
-    1. drive_file_ids[file_key] (fastest - direct file access)
-    2. drive_output_paths[file_key] (navigate Drive folders)
-    3. output_paths[file_key] (legacy local path fallback)
+    1. drive_file_ids[file_key] or drive_file_ids[file_key_alt] (fastest - direct file access)
+    2. drive_output_paths[file_key] or drive_output_paths[file_key_alt] (navigate Drive folders)
+    3. Smart folder traversal: navigate to run folder and list files by exact name
+    4. output_paths[file_key] (legacy local path fallback)
 
     Args:
         file_key: Key name (e.g., "must_reads", "report", "new", "summaries")
@@ -522,39 +523,110 @@ def resolve_and_get_output_file(
     debug_info = None
     content = None
 
+    # Define alternative key names for manifest compatibility
+    # Manifest may use "must_reads" or "must_reads_json", etc.
+    key_alternatives = {
+        "must_reads": ["must_reads", "must_reads_json"],
+        "report": ["report", "report_md"],
+        "new": ["new", "new_csv"],
+        "summaries": ["summaries", "summaries_json"]
+    }
+
+    # Get list of keys to try (both base key and alternative)
+    keys_to_try = key_alternatives.get(file_key, [file_key])
+
+    logger.info(f"[{mode}/{run_id}] Resolving '{file_key}' - will try keys: {keys_to_try}")
+
     # Priority 1: Try drive_file_ids (fastest - direct file ID access)
     drive_file_ids = latest_pointer.get("drive_file_ids") or manifest.get("drive_file_ids")
-    if drive_file_ids and file_key in drive_file_ids:
-        try:
-            file_id = drive_file_ids[file_key]
-            content = download_file_content(file_id)
-            debug_info = {
-                "resolution_method": "drive_file_id",
-                "resolved_path": file_id,
-                "file_key": file_key
-            }
-            logger.info(f"Resolved {file_key} via drive_file_id: {file_id}")
-        except Exception as e:
-            logger.warning(f"Failed to load {file_key} by file ID, trying Drive path: {e}")
+    if drive_file_ids:
+        for key_variant in keys_to_try:
+            if key_variant in drive_file_ids:
+                try:
+                    file_id = drive_file_ids[key_variant]
+                    logger.info(f"[{mode}/{run_id}] Trying drive_file_id for key '{key_variant}': {file_id}")
+                    content = download_file_content(file_id)
+                    debug_info = {
+                        "resolution_method": "drive_file_id",
+                        "resolved_path": file_id,
+                        "file_key": file_key,
+                        "manifest_key": key_variant
+                    }
+                    logger.info(f"[{mode}/{run_id}] ✓ Resolved '{file_key}' via drive_file_id['{key_variant}']: {file_id}")
+                    break
+                except Exception as e:
+                    logger.warning(f"[{mode}/{run_id}] Failed to load '{key_variant}' by file ID {file_id}: {e}")
 
     # Priority 2: Try drive_output_paths (navigate Drive folders)
     if not content:
         drive_output_paths = latest_pointer.get("drive_output_paths") or manifest.get("drive_output_paths")
-        if drive_output_paths and file_key in drive_output_paths:
-            try:
-                drive_path = drive_output_paths[file_key]
-                content = get_output_file_content(drive_path)
-                debug_info = {
-                    "resolution_method": "drive_output_path",
-                    "resolved_path": drive_path,
-                    "file_key": file_key
-                }
-                logger.info(f"Resolved {file_key} via drive_output_path: {drive_path}")
-            except Exception as e:
-                logger.warning(f"Failed to load {file_key} by Drive path, trying local path: {e}")
+        if drive_output_paths:
+            for key_variant in keys_to_try:
+                if key_variant in drive_output_paths:
+                    try:
+                        drive_path = drive_output_paths[key_variant]
+                        logger.info(f"[{mode}/{run_id}] Trying drive_output_path for key '{key_variant}': {drive_path}")
+                        content = get_output_file_content(drive_path)
+                        debug_info = {
+                            "resolution_method": "drive_output_path",
+                            "resolved_path": drive_path,
+                            "file_key": file_key,
+                            "manifest_key": key_variant
+                        }
+                        logger.info(f"[{mode}/{run_id}] ✓ Resolved '{file_key}' via drive_output_path['{key_variant}']: {drive_path}")
+                        break
+                    except Exception as e:
+                        logger.warning(f"[{mode}/{run_id}] Failed to load '{key_variant}' by Drive path {drive_path}: {e}")
 
-    # Priority 3: Fallback to local output_paths (legacy)
+    # Priority 3: Smart folder traversal fallback
+    # Navigate to the run folder and list files by exact filename
     if not content:
+        logger.info(f"[{mode}/{run_id}] Attempting smart folder traversal fallback")
+        try:
+            # Define expected filenames
+            filename_map = {
+                "must_reads": "must_reads.json",
+                "report": "report.md",
+                "new": "new.csv",
+                "summaries": "summaries.json"
+            }
+            expected_filename = filename_map.get(file_key)
+
+            if expected_filename:
+                # Navigate: root -> "Daily" or "Weekly" -> run_id -> filename
+                mode_capitalized = mode.capitalize()  # "daily" -> "Daily", "weekly" -> "Weekly"
+
+                logger.info(f"[{mode}/{run_id}] Looking for file in: {mode_capitalized}/{run_id}/{expected_filename}")
+
+                # Step 1: Find mode folder (Daily or Weekly)
+                mode_folder_id = find_folder_in_parent(mode_capitalized, DRIVE_FOLDER_ID)
+                if not mode_folder_id:
+                    logger.warning(f"[{mode}/{run_id}] Mode folder '{mode_capitalized}' not found in Drive root")
+                else:
+                    # Step 2: Find run folder
+                    run_folder_id = find_folder_in_parent(run_id, mode_folder_id)
+                    if not run_folder_id:
+                        logger.warning(f"[{mode}/{run_id}] Run folder '{run_id}' not found in {mode_capitalized}/")
+                    else:
+                        # Step 3: Find file in run folder
+                        file_id = find_file_in_folder_by_id(expected_filename, run_folder_id)
+                        if file_id:
+                            content = download_file_content(file_id)
+                            debug_info = {
+                                "resolution_method": "smart_folder_traversal",
+                                "resolved_path": f"{mode_capitalized}/{run_id}/{expected_filename}",
+                                "file_key": file_key,
+                                "file_id": file_id
+                            }
+                            logger.info(f"[{mode}/{run_id}] ✓ Resolved '{file_key}' via folder traversal: {expected_filename}")
+                        else:
+                            logger.warning(f"[{mode}/{run_id}] File '{expected_filename}' not found in {mode_capitalized}/{run_id}/")
+        except Exception as e:
+            logger.warning(f"[{mode}/{run_id}] Smart folder traversal failed: {e}")
+
+    # Priority 4: Fallback to local output_paths (legacy)
+    if not content:
+        logger.info(f"[{mode}/{run_id}] Attempting legacy output_paths fallback")
         output_paths = manifest.get("output_paths") or manifest.get("local_output_paths", {})
 
         # Map file_key to output_paths key
@@ -572,20 +644,23 @@ def resolve_and_get_output_file(
                 # Convert local path to Drive path (e.g., data/outputs/daily/run_id/file.json -> outputs/daily/run_id/file.json)
                 # Strip "data/" prefix if present
                 drive_path = local_path.replace("data/", "")
+                logger.info(f"[{mode}/{run_id}] Trying legacy path: {drive_path}")
                 content = get_output_file_content(drive_path)
                 debug_info = {
                     "resolution_method": "local_fallback",
                     "resolved_path": drive_path,
                     "file_key": file_key
                 }
-                logger.info(f"Resolved {file_key} via local fallback: {drive_path}")
+                logger.info(f"[{mode}/{run_id}] ✓ Resolved '{file_key}' via local fallback: {drive_path}")
             except Exception as e:
-                logger.error(f"Failed to load {file_key} via all methods: {e}")
+                logger.error(f"[{mode}/{run_id}] Failed to load '{file_key}' via local fallback: {e}")
 
     if not content:
+        error_detail = f"Output file '{file_key}' not found via any resolution method for mode={mode}, run_id={run_id}. Tried: drive_file_ids={list(drive_file_ids.keys()) if drive_file_ids else 'N/A'}, drive_output_paths={list(drive_output_paths.keys()) if drive_output_paths else 'N/A'}, folder_traversal, legacy_paths"
+        logger.error(f"[{mode}/{run_id}] {error_detail}")
         raise HTTPException(
             status_code=503,
-            detail=f"Output file '{file_key}' not found via any resolution method for mode={mode}, run_id={run_id}"
+            detail=error_detail
         )
 
     return content, debug_info if debug else None
@@ -863,7 +938,8 @@ async def get_report(
 
 @app.get("/manifest")
 async def get_manifest(
-    mode: str = Query(default="daily", description="Run mode: daily or weekly")
+    mode: str = Query(default="daily", description="Run mode: daily or weekly"),
+    include_warnings: bool = Query(default=True, description="Include validation warnings")
 ):
     """
     Get the latest manifest in JSON format for a specific mode.
@@ -871,9 +947,11 @@ async def get_manifest(
     This endpoint loads the manifest for the latest run of the specified mode:
     1. Reads manifests/<mode>/latest.json to get the latest run_id
     2. Loads and returns manifests/<mode>/<run_id>.json
+    3. Optionally adds validation warnings if Drive fields are missing
 
     Query Parameters:
     - mode: Either "daily" or "weekly" (default: "daily")
+    - include_warnings: Add validation warnings for missing Drive fields (default: true)
 
     Returns:
         Manifest JSON for the latest run of the specified mode
@@ -881,9 +959,39 @@ async def get_manifest(
     Examples:
     - /manifest?mode=daily
     - /manifest?mode=weekly
+    - /manifest?mode=daily&include_warnings=false
     """
     latest_run = get_latest_run(mode)
-    return latest_run["manifest"]
+    manifest = latest_run["manifest"]
+
+    if include_warnings:
+        warnings = []
+
+        # Check for Drive file IDs
+        drive_file_ids = manifest.get("drive_file_ids")
+        if not drive_file_ids:
+            warnings.append("Missing 'drive_file_ids' - backend will use slower folder traversal")
+
+        # Check for Drive output paths
+        drive_output_paths = manifest.get("drive_output_paths")
+        if not drive_output_paths:
+            warnings.append("Missing 'drive_output_paths' - backend will use slower folder traversal")
+
+        # Check for local paths (should be present for backward compatibility)
+        output_paths = manifest.get("output_paths") or manifest.get("local_output_paths")
+        if not output_paths:
+            warnings.append("Missing 'output_paths' and 'local_output_paths' - no legacy fallback available")
+
+        # Add warnings to response if any exist
+        if warnings:
+            result = {
+                "_warnings": warnings,
+                "_recommendation": "Update pipeline to include drive_file_ids and drive_output_paths in manifest",
+                **manifest
+            }
+            return result
+
+    return manifest
 
 
 @app.get("/new")

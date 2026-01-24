@@ -2,143 +2,24 @@
   "openapi": "3.0.1",
   "info": {
     "title": "AciTrack API",
-    "description": "API for accessing latest academic publication reports and data from AciTrack system",
-    "version": "1.0.0"
+    "description": "Postgres-backed API for accessing academic publication tracking data from the AciTrack system",
+    "version": "2.0.0"
   },
   "servers": [
     {
-      "url": "https://your-app-name.up.railway.app",
-      "description": "Production server (replace with your actual Railway URL)"
+      "url": "https://your-app-name.onrender.com",
+      "description": "Production server (replace with your actual Render URL)"
     }
   ],
   "paths": {
-    "/report": {
-      "get": {
-        "operationId": "getLatestReport",
-        "summary": "Get latest academic publications report",
-        "description": "Returns the latest report in Markdown format containing academic publication updates",
-        "responses": {
-          "200": {
-            "description": "Successful response with report content",
-            "content": {
-              "text/markdown": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Report file not found in Google Drive",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/manifest": {
-      "get": {
-        "operationId": "getLatestManifest",
-        "summary": "Get latest publications manifest",
-        "description": "Returns the latest manifest JSON containing metadata about academic publications",
-        "responses": {
-          "200": {
-            "description": "Successful response with manifest data",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "description": "Manifest data with publication metadata"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Manifest file not found in Google Drive",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/new": {
-      "get": {
-        "operationId": "getNewPublications",
-        "summary": "Get new publications CSV",
-        "description": "Returns CSV file containing newly discovered academic publications",
-        "responses": {
-          "200": {
-            "description": "Successful response with CSV data",
-            "content": {
-              "text/csv": {
-                "schema": {
-                  "type": "string",
-                  "format": "binary"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "CSV file not found in Google Drive",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/health": {
       "get": {
         "operationId": "healthCheck",
         "summary": "Health check endpoint",
-        "description": "Verifies service health and Google Drive connectivity",
+        "description": "Verifies service health and database connectivity",
         "responses": {
           "200": {
-            "description": "Service is healthy",
+            "description": "Service health status",
             "content": {
               "application/json": {
                 "schema": {
@@ -148,15 +29,308 @@
                       "type": "string",
                       "example": "healthy"
                     },
-                    "drive_connected": {
+                    "db_connected": {
                       "type": "boolean",
                       "example": true
                     },
-                    "folder_name": {
+                    "db_host": {
                       "type": "string"
                     },
-                    "folder_id": {
+                    "time": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/runs/latest": {
+      "get": {
+        "operationId": "getLatestRun",
+        "summary": "Get latest run for a mode",
+        "description": "Returns the most recent run metadata for a specific mode (tri-model-daily, daily, or weekly)",
+        "security": [{"ApiKeyAuth": []}],
+        "parameters": [
+          {
+            "name": "mode",
+            "in": "query",
+            "description": "Run mode: tri-model-daily, daily, or weekly",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["tri-model-daily", "daily", "weekly"],
+              "default": "tri-model-daily"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Latest run metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Run"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No runs found for mode",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/runs/{run_id}": {
+      "get": {
+        "operationId": "getRunById",
+        "summary": "Get run by ID",
+        "description": "Returns run metadata for a specific run_id",
+        "security": [{"ApiKeyAuth": []}],
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Unique run identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Run metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Run"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Run not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/must-reads": {
+      "get": {
+        "operationId": "getMustReads",
+        "summary": "Get must-read publications",
+        "description": "Returns must-read publications for a specific mode or run_id",
+        "security": [{"ApiKeyAuth": []}],
+        "parameters": [
+          {
+            "name": "mode",
+            "in": "query",
+            "description": "Run mode to get latest must-reads",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["tri-model-daily", "daily", "weekly"]
+            }
+          },
+          {
+            "name": "run_id",
+            "in": "query",
+            "description": "Specific run_id to get must-reads",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Must-read publications",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "run_id": {
                       "type": "string"
+                    },
+                    "mode": {
+                      "type": "string"
+                    },
+                    "must_reads": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing required query parameter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Must-reads not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/paper/{publication_id}": {
+      "get": {
+        "operationId": "getPaper",
+        "summary": "Get paper tri-model evaluation",
+        "description": "Returns tri-model event data for a specific publication",
+        "security": [{"ApiKeyAuth": []}],
+        "parameters": [
+          {
+            "name": "publication_id",
+            "in": "path",
+            "description": "Publication identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "run_id",
+            "in": "query",
+            "description": "Optional run_id filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tri-model event data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriModelEvent"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Publication not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/disagreements": {
+      "get": {
+        "operationId": "getDisagreements",
+        "summary": "Get model disagreements",
+        "description": "Returns tri-model events with disagreements, with optional filtering",
+        "security": [{"ApiKeyAuth": []}],
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "query",
+            "description": "Filter by run_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "agreement",
+            "in": "query",
+            "description": "Comma-separated agreement levels (e.g., 'low,moderate')",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "min_delta",
+            "in": "query",
+            "description": "Minimum score delta between models",
+            "required": false,
+            "schema": {
+              "type": "number"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum results to return (default 50, max 500)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of disagreements",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "count": {
+                      "type": "integer"
+                    },
+                    "filters": {
+                      "type": "object"
+                    },
+                    "disagreements": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/DisagreementEvent"
+                      }
                     }
                   }
                 }
@@ -168,7 +342,146 @@
     }
   },
   "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "API key for authentication. Required for all endpoints except /health."
+      }
+    },
     "schemas": {
+      "Run": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "window_start": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "window_end": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "counts": {
+            "type": "object"
+          },
+          "config": {
+            "type": "object"
+          },
+          "artifacts": {
+            "type": "object"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "TriModelEvent": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "publication_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "agreement_level": {
+            "type": "string",
+            "enum": ["high", "moderate", "low"]
+          },
+          "disagreements": {
+            "type": "string"
+          },
+          "evaluator_rationale": {
+            "type": "string"
+          },
+          "claude_review": {
+            "type": "object"
+          },
+          "gemini_review": {
+            "type": "object"
+          },
+          "gpt_eval": {
+            "type": "object"
+          },
+          "final_relevancy_score": {
+            "type": "number"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "DisagreementEvent": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "publication_id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "agreement_level": {
+            "type": "string"
+          },
+          "disagreements": {
+            "type": "string"
+          },
+          "evaluator_rationale": {
+            "type": "string"
+          },
+          "claude_score": {
+            "type": "number"
+          },
+          "gemini_score": {
+            "type": "number"
+          },
+          "score_delta": {
+            "type": "number"
+          },
+          "final_relevancy_score": {
+            "type": "number"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "Error": {
         "type": "object",
         "properties": {

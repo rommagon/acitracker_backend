@@ -1,0 +1,179 @@
+"""
+Database configuration and models for AciTrack Backend.
+Uses SQLAlchemy 2.0 with sync driver (psycopg2) for Render Postgres.
+"""
+
+import os
+from datetime import datetime
+from typing import Optional
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
+from sqlalchemy import (
+    create_engine,
+    Column,
+    String,
+    Integer,
+    Float,
+    DateTime,
+    Text,
+    Index,
+    text,
+)
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
+from sqlalchemy.pool import NullPool
+
+# Read DATABASE_URL from environment
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL environment variable is required")
+
+# Ensure SSL mode for Render Postgres
+# Render requires sslmode=require for Postgres connections
+def ensure_ssl_mode(url: str) -> str:
+    """
+    Ensure DATABASE_URL has sslmode=require for Render Postgres.
+    Safe for local dev (only adds if not already present).
+    """
+    if "sslmode=" in url:
+        # SSL mode already configured
+        return url
+
+    parsed = urlparse(url)
+
+    if parsed.query:
+        # Query string exists, append to it
+        return url + "&sslmode=require"
+    else:
+        # No query string, add one
+        return url + "?sslmode=require"
+
+DATABASE_URL = ensure_ssl_mode(DATABASE_URL)
+
+# Create SQLAlchemy engine (sync)
+# Use NullPool for serverless environments to avoid connection pool issues
+engine = create_engine(
+    DATABASE_URL,
+    poolclass=NullPool,
+    echo=False,  # Set to True for SQL query logging during development
+)
+
+# Create session factory
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# Base class for models
+Base = declarative_base()
+
+
+class Run(Base):
+    """
+    Stores metadata for each pipeline run (daily/weekly).
+    """
+    __tablename__ = "runs"
+
+    run_id = Column(String, primary_key=True, index=True)
+    mode = Column(String, nullable=False, index=True)  # "tri-model-daily", "daily", "weekly"
+    started_at = Column(DateTime, nullable=True)
+    window_start = Column(DateTime, nullable=True)
+    window_end = Column(DateTime, nullable=True)
+
+    # JSON fields stored as text
+    counts_json = Column(Text, nullable=True)  # JSON string with counts
+    config_json = Column(Text, nullable=True)  # JSON string with run config
+    artifacts_json = Column(Text, nullable=True)  # JSON string with artifact metadata
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    # Indexes
+    __table_args__ = (
+        Index("idx_runs_mode_started", "mode", "started_at"),
+    )
+
+
+class TriModelEvent(Base):
+    """
+    Stores tri-model evaluation events (publications evaluated by multiple models).
+    Corresponds to the existing tri_model_events table in the database.
+    """
+    __tablename__ = "tri_model_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(String, nullable=False, index=True)
+    mode = Column(String, nullable=False, index=True)  # "tri-model-daily", etc.
+    publication_id = Column(String, nullable=False, index=True)
+    title = Column(Text, nullable=True)
+
+    # Tri-model scoring fields
+    agreement_level = Column(String, nullable=True)  # "high", "moderate", "low"
+    disagreements = Column(Text, nullable=True)  # Text description of disagreements
+    evaluator_rationale = Column(Text, nullable=True)
+
+    # Model review JSON (stored as text)
+    claude_review_json = Column(Text, nullable=True)
+    gemini_review_json = Column(Text, nullable=True)
+    gpt_eval_json = Column(Text, nullable=True)
+
+    # Final scores
+    final_relevancy_score = Column(Float, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # Composite unique constraint
+    __table_args__ = (
+        Index("idx_tri_model_run_pub", "run_id", "publication_id", unique=True),
+        Index("idx_tri_model_mode_agreement", "mode", "agreement_level"),
+    )
+
+
+class MustRead(Base):
+    """
+    Stores must-read decisions per run.
+    Each run has one row with a JSON blob of must-reads.
+    """
+    __tablename__ = "must_reads"
+
+    run_id = Column(String, primary_key=True, index=True)
+    mode = Column(String, nullable=False, index=True)
+    must_reads_json = Column(Text, nullable=False)  # JSON array of must-read publications
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+def get_db() -> Session:
+    """
+    Dependency function to get a database session.
+    Yields a session and closes it after use.
+    """
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def init_db():
+    """
+    Initialize database tables.
+    Creates all tables defined in Base metadata.
+
+    Note: For production, use Alembic migrations instead.
+    """
+    Base.metadata.create_all(bind=engine)
+
+
+def test_connection() -> bool:
+    """
+    Test database connectivity.
+
+    Returns:
+        True if connection successful, False otherwise
+    """
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True
+    except Exception as e:
+        print(f"Database connection failed: {e}")
+        return False

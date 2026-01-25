@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 60" width="200" height="60">
+  <!-- Dot matrix pattern -->
+  <g>
+    <!-- Row 1 -->
+    <circle cx="10" cy="10" r="4" fill="#4A90D9"/>
+    <circle cx="22" cy="10" r="4" fill="#E91E63"/>
+    <circle cx="34" cy="10" r="4" fill="#4A90D9"/>
+    <circle cx="46" cy="10" r="4" fill="#F5A623"/>
+    <circle cx="58" cy="10" r="4" fill="#4A90D9"/>
+    <!-- Row 2 -->
+    <circle cx="10" cy="22" r="4" fill="#F5A623"/>
+    <circle cx="22" cy="22" r="4" fill="#4A90D9"/>
+    <circle cx="34" cy="22" r="4" fill="#4CAF50"/>
+    <circle cx="46" cy="22" r="4" fill="#4A90D9"/>
+    <circle cx="58" cy="22" r="4" fill="#E91E63"/>
+    <!-- Row 3 -->
+    <circle cx="10" cy="34" r="4" fill="#4A90D9"/>
+    <circle cx="22" cy="34" r="4" fill="#00BCD4"/>
+    <circle cx="34" cy="34" r="4" fill="#4A90D9"/>
+    <circle cx="46" cy="34" r="4" fill="#F5A623"/>
+    <circle cx="58" cy="34" r="4" fill="#4A90D9"/>
+    <!-- Row 4 -->
+    <circle cx="10" cy="46" r="4" fill="#4CAF50"/>
+    <circle cx="22" cy="46" r="4" fill="#4A90D9"/>
+    <circle cx="34" cy="46" r="4" fill="#E91E63"/>
+    <circle cx="46" cy="46" r="4" fill="#4A90D9"/>
+    <circle cx="58" cy="46" r="4" fill="#00BCD4"/>
+  </g>
+  <!-- Text -->
+  <text x="75" y="28" font-family="Georgia, serif" font-size="20" font-weight="bold" fill="#1a1a1a">
+    <tspan>spot</tspan>
+    <tspan fill="#1a1a1a"> i</tspan>
+    <tspan fill="#E91E63">t</tspan>
+  </text>
+  <text x="75" y="48" font-family="Georgia, serif" font-size="20" font-weight="bold" fill="#1a1a1a">early</text>
+</svg>

@@ -653,17 +653,22 @@ CALIBRATION_UI_HTML = '''
     <title>Science Agent - Calibration Tool</title>
     <style>
         :root {
-            --primary: #0066cc;
-            --primary-dark: #004d99;
-            --primary-light: #e6f0ff;
-            --accent: #00a86b;
-            --accent-light: #e6fff5;
-            --warning: #f59e0b;
-            --warning-light: #fef3c7;
+            /* Spot It Early brand colors */
+            --primary: #4A90D9;
+            --primary-dark: #3A7BC8;
+            --primary-light: #E8F2FC;
+            --accent: #E91E63;
+            --accent-light: #FCE4EC;
+            --highlight: #F5A623;
+            --highlight-light: #FEF3E2;
+            --teal: #00BCD4;
+            --teal-light: #E0F7FA;
+            --success: #4CAF50;
+            --success-light: #E8F5E9;
             --error: #dc2626;
             --error-light: #fef2f2;
-            --success: #22c55e;
-            --success-light: #f0fdf4;
+            --background: #f9fafb;
+            --text: #1a1a1a;
             --gray-50: #f9fafb;
             --gray-100: #f3f4f6;
             --gray-200: #e5e7eb;
@@ -686,8 +691,8 @@ CALIBRATION_UI_HTML = '''
             max-width: 800px;
             margin: 0 auto;
             padding: 24px 16px;
-            background: linear-gradient(135deg, var(--gray-50) 0%, var(--gray-100) 100%);
-            color: var(--gray-900);
+            background: linear-gradient(135deg, var(--background) 0%, var(--gray-100) 100%);
+            color: var(--text);
             min-height: 100vh;
             line-height: 1.6;
         }
@@ -702,8 +707,8 @@ CALIBRATION_UI_HTML = '''
             box-shadow: var(--shadow);
         }
         .logo {
-            width: 56px;
-            height: 56px;
+            width: 120px;
+            height: 40px;
             border-radius: var(--radius-sm);
             object-fit: contain;
         }
@@ -846,7 +851,7 @@ CALIBRATION_UI_HTML = '''
             height: 8px;
             -webkit-appearance: none;
             appearance: none;
-            background: linear-gradient(to right, var(--error) 0%, var(--warning) 50%, var(--success) 100%);
+            background: linear-gradient(to right, var(--accent) 0%, var(--highlight) 50%, var(--success) 100%);
             border-radius: 4px;
             cursor: pointer;
         }
@@ -920,14 +925,14 @@ CALIBRATION_UI_HTML = '''
             text-align: center;
         }
         .result-card.mismatch {
-            background: var(--warning-light);
-            border-color: var(--warning);
+            background: var(--highlight-light);
+            border-color: var(--highlight);
         }
         .result-card h2 {
             color: var(--success);
         }
         .result-card.mismatch h2 {
-            color: var(--warning);
+            color: var(--highlight);
         }
         .score-comparison {
             display: flex;
@@ -954,7 +959,7 @@ CALIBRATION_UI_HTML = '''
             color: var(--primary);
         }
         .score-box.llm .value {
-            color: var(--accent);
+            color: var(--teal);
         }
         .hidden {
             display: none !important;
@@ -1016,17 +1021,6 @@ CALIBRATION_UI_HTML = '''
             text-transform: uppercase;
             letter-spacing: 0.5px;
             margin-top: 4px;
-        }
-        .gold-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-            background: var(--warning-light);
-            color: #92400e;
-            padding: 6px 12px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: 600;
         }
         .error {
             color: var(--error);
@@ -1094,7 +1088,7 @@ CALIBRATION_UI_HTML = '''
 </head>
 <body>
     <div class="header">
-        <img src="/static/logo.png" alt="Science Agent Logo" class="logo" onerror="this.style.display='none'">
+        <img src="/static/spot_it_early_logo.svg" alt="Spot It Early Logo" class="logo" onerror="this.style.display='none'">
         <div class="header-text">
             <h1>Science Agent Calibration</h1>
             <p class="subtitle">Help calibrate AI relevancy scoring by rating publications</p>
@@ -1133,7 +1127,6 @@ CALIBRATION_UI_HTML = '''
             <div class="paper-meta">
                 <span id="paper-source"></span>
                 <span id="paper-date"></span>
-                <span id="gold-badge" class="gold-badge hidden">⭐ Gold Standard</span>
             </div>
             <hr class="divider">
             <div class="summary-section">
@@ -1307,14 +1300,6 @@ CALIBRATION_UI_HTML = '''
             document.getElementById('paper-date').textContent = item.published_date ? `📅 ${item.published_date.split('T')[0]}` : '';
             document.getElementById('paper-summary').textContent = item.final_summary || 'No summary available.';
 
-            // Show gold badge if applicable
-            const goldBadge = document.getElementById('gold-badge');
-            if (item.tags && item.tags.gold) {
-                goldBadge.classList.remove('hidden');
-            } else {
-                goldBadge.classList.add('hidden');
-            }
-
             // Reset form
             document.getElementById('score-slider').value = 50;
             document.getElementById('score-display').textContent = '50';
@@ -1415,8 +1400,8 @@ CALIBRATION_UI_HTML = '''
                         <div class="label">Avg Score</div>
                     </div>
                     <div class="stat-box">
-                        <div class="value">${stats.gold_rated || 0}/${stats.gold_total || 0}</div>
-                        <div class="label">Gold Rated</div>
+                        <div class="value">${stats.remaining || 0}</div>
+                        <div class="label">Remaining</div>
                     </div>
                 `;
             } catch (error) {

@@ -150,6 +150,28 @@ class MustRead(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
+class Publication(Base):
+    """
+    Canonical publications table - one row per unique publication.
+    Stores core metadata that doesn't change across runs.
+    """
+    __tablename__ = "publications"
+
+    publication_id = Column(String, primary_key=True, index=True)
+    title = Column(Text, nullable=False)
+    source = Column(String, nullable=True)  # Journal/source name
+    published_date = Column(DateTime, nullable=True)
+    url = Column(Text, nullable=True)  # Link to publication
+
+    # Denormalized latest run info for quick access
+    latest_run_id = Column(String, nullable=True, index=True)
+    latest_relevancy_score = Column(Float, nullable=True)
+    latest_credibility_score = Column(Float, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
 # Embedding dimension for text-embedding-3-small
 EMBEDDING_DIMENSION = 1536
 

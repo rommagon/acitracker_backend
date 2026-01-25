@@ -24,6 +24,7 @@ from db import (
     Run,
     TriModelEvent,
     MustRead,
+    Publication,
     PublicationEmbedding,
     EMBEDDING_DIMENSION,
     PGVECTOR_AVAILABLE,
@@ -629,6 +630,8 @@ async def ingest_tri_model_events(
     inserted = 0
     updated = 0
 
+    now = datetime.utcnow()
+
     for event_data in events:
         publication_id = event_data.get("publication_id")
         if not publication_id:
@@ -676,6 +679,71 @@ async def ingest_tri_model_events(
             )
             db.add(new_event)
             inserted += 1
+
+        # Upsert canonical publication record
+        # Extract metadata from review JSONs
+        source = None
+        published_date = None
+        url = None
+        credibility_score = None
+
+        for review in [event_data.get("claude_review"), event_data.get("gemini_review"), event_data.get("gpt_eval")]:
+            if review and isinstance(review, dict):
+                if not source and review.get("source"):
+                    source = str(review["source"])[:255]
+                if not published_date and review.get("published_date"):
+                    try:
+                        pub_date_str = review["published_date"]
+                        if isinstance(pub_date_str, str):
+                            published_date = datetime.fromisoformat(pub_date_str.replace("Z", "+00:00"))
+                    except (ValueError, TypeError):
+                        pass
+                if not url and review.get("url"):
+                    url = str(review["url"])
+                if credibility_score is None and review.get("credibility_score") is not None:
+                    try:
+                        credibility_score = float(review["credibility_score"])
+                    except (ValueError, TypeError):
+                        pass
+
+        # Upsert publication
+        existing_pub = db.query(Publication).filter(
+            Publication.publication_id == publication_id
+        ).first()
+
+        title = event_data.get("title")
+        relevancy_score = event_data.get("final_relevancy_score")
+
+        if existing_pub:
+            # Update with latest info
+            if title:
+                existing_pub.title = title
+            if source:
+                existing_pub.source = source
+            if published_date:
+                existing_pub.published_date = published_date
+            if url:
+                existing_pub.url = url
+            existing_pub.latest_run_id = run_id
+            if relevancy_score is not None:
+                existing_pub.latest_relevancy_score = relevancy_score
+            if credibility_score is not None:
+                existing_pub.latest_credibility_score = credibility_score
+            existing_pub.updated_at = now
+        else:
+            # Insert new publication
+            if title:
+                new_pub = Publication(
+                    publication_id=publication_id,
+                    title=title,
+                    source=source,
+                    published_date=published_date,
+                    url=url,
+                    latest_run_id=run_id,
+                    latest_relevancy_score=relevancy_score,
+                    latest_credibility_score=credibility_score,
+                )
+                db.add(new_pub)
 
     db.commit()
 
@@ -1069,62 +1137,39 @@ async def search_publications(
 
     # Execute semantic search query
     # Note: Use (:param)::vector syntax to avoid SQLAlchemy parsing issues with ::
-    # JOIN with tri_model_events to get source/published_date from review JSONs
-    # when not available in publication_embeddings
+    # JOIN with canonical publications table for reliable metadata (source, published_date)
+    # Use LEFT JOIN LATERAL on tri_model_events for latest_run_id and scores
     search_query = text(f"""
         WITH ranked_results AS (
             SELECT
                 pe.publication_id,
-                pe.title,
-                pe.source,
-                pe.published_date,
-                pe.latest_run_id,
-                pe.final_relevancy_score,
-                pe.credibility_score,
-                pe.final_summary,
                 pe.embedding <-> (:query_embedding)::vector AS distance
             FROM publication_embeddings pe
             WHERE {where_sql}
             ORDER BY pe.embedding <-> (:query_embedding)::vector
             LIMIT :limit
-        ),
-        enriched_results AS (
-            SELECT
-                rr.publication_id,
-                rr.title,
-                COALESCE(
-                    rr.source,
-                    tme.claude_review_json::jsonb->>'source',
-                    tme.gemini_review_json::jsonb->>'source',
-                    tme.gpt_eval_json::jsonb->>'source'
-                ) AS source,
-                COALESCE(
-                    rr.published_date,
-                    (tme.claude_review_json::jsonb->>'published_date')::timestamp,
-                    (tme.gemini_review_json::jsonb->>'published_date')::timestamp,
-                    (tme.gpt_eval_json::jsonb->>'published_date')::timestamp
-                ) AS published_date,
-                rr.latest_run_id,
-                COALESCE(rr.final_relevancy_score, tme.final_relevancy_score) AS final_relevancy_score,
-                rr.credibility_score,
-                COALESCE(
-                    rr.final_summary,
-                    tme.claude_review_json::jsonb->>'summary',
-                    tme.gemini_review_json::jsonb->>'summary',
-                    tme.gpt_eval_json::jsonb->>'summary'
-                ) AS final_summary,
-                rr.distance
-            FROM ranked_results rr
-            LEFT JOIN LATERAL (
-                SELECT *
-                FROM tri_model_events
-                WHERE publication_id = rr.publication_id
-                ORDER BY created_at DESC
-                LIMIT 1
-            ) tme ON true
         )
-        SELECT * FROM enriched_results
-        ORDER BY distance
+        SELECT
+            rr.publication_id,
+            p.title,
+            p.source,
+            p.published_date,
+            p.latest_run_id,
+            COALESCE(p.latest_relevancy_score, tme.final_relevancy_score) AS final_relevancy_score,
+            p.latest_credibility_score AS credibility_score,
+            pe.final_summary,
+            rr.distance
+        FROM ranked_results rr
+        JOIN publications p ON p.publication_id = rr.publication_id
+        LEFT JOIN publication_embeddings pe ON pe.publication_id = rr.publication_id
+        LEFT JOIN LATERAL (
+            SELECT final_relevancy_score
+            FROM tri_model_events
+            WHERE publication_id = rr.publication_id
+            ORDER BY created_at DESC
+            LIMIT 1
+        ) tme ON true
+        ORDER BY rr.distance
     """)
 
     try:

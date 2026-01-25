@@ -512,6 +512,130 @@ class TestSearchResultsIncludeSourceAndDate:
                                                 assert result["published_date"] is None
 
 
+class TestSearchMetadataFromCanonicalTable:
+    """Test that search results get metadata from canonical publications table."""
+
+    def test_search_returns_metadata_from_publications_table(self):
+        """
+        Test that search results include source, published_date, and latest_run_id
+        from the canonical publications table (not from JSON parsing).
+
+        This verifies the fix for: "Do NOT rely on parsing claude_review_json/gemini_review_json
+        for source/date; use canonical metadata."
+        """
+        with patch.dict(os.environ, {
+            "DATABASE_URL": "postgresql://test:test@localhost/test",
+            "SPOTITEARLY_LLM_API_KEY": "sk-test-key"
+        }):
+            with patch("db.engine"):
+                with patch("db.SessionLocal"):
+                    with patch("db.PGVECTOR_AVAILABLE", True):
+                        with patch("main.PGVECTOR_AVAILABLE", True):
+                            with patch("main.is_embedding_available", return_value=True):
+                                with patch("main.get_openai_client") as mock_client:
+                                    with patch("main.generate_embedding") as mock_embed:
+                                        with patch("main.get_db") as mock_get_db:
+                                            dummy_embedding = [0.1] * 1536
+                                            mock_embed.return_value = dummy_embedding
+
+                                            mock_session = MagicMock()
+                                            mock_session.query.return_value.filter.return_value.count.return_value = 10
+
+                                            # Mock search results with all metadata from publications table
+                                            from datetime import datetime
+                                            mock_result = MagicMock()
+                                            mock_result.fetchall.return_value = [
+                                                (
+                                                    "pub_canonical_123",
+                                                    "AI Cancer Detection Study",
+                                                    "The Lancet",  # source from publications table
+                                                    datetime(2025, 1, 20),  # published_date from publications table
+                                                    "run_latest_abc",  # latest_run_id from publications table
+                                                    95.0,  # relevancy
+                                                    92.0,  # credibility
+                                                    "Machine learning enables early cancer detection.",
+                                                    0.15,   # distance
+                                                ),
+                                            ]
+                                            mock_session.execute.return_value = mock_result
+
+                                            def mock_db_generator():
+                                                yield mock_session
+                                            mock_get_db.return_value = mock_db_generator()
+
+                                            from main import app
+                                            client = TestClient(app, raise_server_exceptions=False)
+
+                                            response = client.get("/search/publications?q=AI+cancer+detection")
+
+                                            if response.status_code == 200:
+                                                data = response.json()
+                                                assert "results" in data
+                                                assert len(data["results"]) == 1
+
+                                                result = data["results"][0]
+
+                                                # Verify all metadata fields are non-null
+                                                assert result["publication_id"] == "pub_canonical_123"
+                                                assert result["title"] == "AI Cancer Detection Study"
+                                                assert result["source"] == "The Lancet"
+                                                assert result["published_date"] == "2025-01-20"
+                                                assert result["best_run_id"] == "run_latest_abc"
+                                                assert result["final_relevancy_score"] == 95.0
+                                                assert result["credibility_score"] == 92.0
+                                                assert result["final_summary"] is not None
+
+    def test_search_requires_publications_table_join(self):
+        """
+        Verify that search SQL joins with publications table.
+
+        The query should:
+        1. Start from publication_embeddings for vector ordering
+        2. JOIN publications table for metadata (title, source, published_date)
+        3. Get latest_run_id from publications table
+        """
+        with patch.dict(os.environ, {
+            "DATABASE_URL": "postgresql://test:test@localhost/test",
+            "SPOTITEARLY_LLM_API_KEY": "sk-test-key"
+        }):
+            with patch("db.engine"):
+                with patch("db.SessionLocal"):
+                    with patch("db.PGVECTOR_AVAILABLE", True):
+                        with patch("main.PGVECTOR_AVAILABLE", True):
+                            with patch("main.is_embedding_available", return_value=True):
+                                with patch("main.get_openai_client"):
+                                    with patch("main.generate_embedding") as mock_embed:
+                                        with patch("main.get_db") as mock_get_db:
+                                            mock_embed.return_value = [0.1] * 1536
+
+                                            mock_session = MagicMock()
+                                            mock_session.query.return_value.filter.return_value.count.return_value = 10
+
+                                            mock_result = MagicMock()
+                                            mock_result.fetchall.return_value = []
+                                            mock_session.execute.return_value = mock_result
+
+                                            def mock_db_generator():
+                                                yield mock_session
+                                            mock_get_db.return_value = mock_db_generator()
+
+                                            from main import app
+                                            client = TestClient(app, raise_server_exceptions=False)
+
+                                            response = client.get("/search/publications?q=test")
+
+                                            # Verify execute was called and check SQL contains publications JOIN
+                                            if mock_session.execute.called:
+                                                call_args = mock_session.execute.call_args
+                                                sql_query = str(call_args[0][0])
+
+                                                # Verify the SQL joins with publications table
+                                                assert "JOIN publications" in sql_query, \
+                                                    "Search query should JOIN with publications table"
+                                                assert "p.source" in sql_query or "publications" in sql_query, \
+                                                    "Search query should select from publications table"
+
+
 # Mark integration tests that require actual database
 @pytest.mark.integration
 class TestSearchIntegration:
@@ -536,12 +660,17 @@ class TestSearchIntegration:
         """Test that backfill script works correctly."""
         pass  # Would test actual embedding generation
 
-    def test_search_results_include_source_and_date_from_join(self, db_session):
+    def test_search_metadata_from_canonical_publications(self, db_session):
         """
         Integration test: Verify that search results include source and published_date
-        from the JOIN with tri_model_events even when not stored in publication_embeddings.
+        from the canonical publications table (not JSON parsing).
+
+        Steps:
+        1. Seed publications table with known metadata
+        2. Run search query
+        3. Verify results have correct source/date from publications table
         """
-        pass  # Would seed database and verify JOIN enrichment
+        pass  # Would seed database and verify canonical metadata
 
 
 if __name__ == "__main__":

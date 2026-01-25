@@ -140,10 +140,11 @@ def get_publications_needing_embeddings(
             "gpt_eval_json": row[8],
         }
 
-        # Try to extract source and summary from review JSONs
+        # Try to extract source, summary, published_date from review JSONs
         pub["source"] = None
         pub["final_summary"] = None
         pub["credibility_score"] = None
+        pub["published_date"] = None
 
         for review_json in [pub["claude_review_json"], pub["gemini_review_json"], pub["gpt_eval_json"]]:
             if review_json:
@@ -155,6 +156,8 @@ def get_publications_needing_embeddings(
                         pub["final_summary"] = review.get("summary")
                     if not pub["credibility_score"] and review.get("credibility_score"):
                         pub["credibility_score"] = review.get("credibility_score")
+                    if not pub["published_date"] and review.get("published_date"):
+                        pub["published_date"] = review.get("published_date")
                 except (json.JSONDecodeError, TypeError):
                     pass
 
@@ -225,9 +228,18 @@ def process_batch(
                     PublicationEmbedding.publication_id == pub_id
                 ).first()
 
+                # Parse published_date if it's a string
+                published_date = pub.get("published_date")
+                if published_date and isinstance(published_date, str):
+                    try:
+                        published_date = datetime.fromisoformat(published_date.replace("Z", "+00:00"))
+                    except (ValueError, TypeError):
+                        published_date = None
+
                 if existing:
                     existing.title = pub["title"]
                     existing.source = pub.get("source")
+                    existing.published_date = published_date
                     existing.embedded_text = text
                     existing.embedding = embedding
                     existing.embedding_model = EMBEDDING_MODEL
@@ -242,6 +254,7 @@ def process_batch(
                         publication_id=pub_id,
                         title=pub["title"],
                         source=pub.get("source"),
+                        published_date=published_date,
                         embedded_text=text,
                         embedding=embedding,
                         embedding_model=EMBEDDING_MODEL,

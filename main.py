@@ -846,6 +846,7 @@ async def ingest_embeddings(
             source = None
             final_summary = None
             credibility_score = None
+            published_date = None
 
             for review_json in [event.claude_review_json, event.gemini_review_json, event.gpt_eval_json]:
                 if review_json:
@@ -857,6 +858,13 @@ async def ingest_embeddings(
                             final_summary = review.get("summary")
                         if not credibility_score and review.get("credibility_score"):
                             credibility_score = review.get("credibility_score")
+                        if not published_date and review.get("published_date"):
+                            pub_date_str = review.get("published_date")
+                            if isinstance(pub_date_str, str):
+                                try:
+                                    published_date = datetime.fromisoformat(pub_date_str.replace("Z", "+00:00"))
+                                except (ValueError, TypeError):
+                                    pass
                     except (json.JSONDecodeError, TypeError):
                         pass
 
@@ -871,6 +879,7 @@ async def ingest_embeddings(
                 "title": event.title,
                 "text": text,
                 "source": source,
+                "published_date": published_date,
                 "final_summary": final_summary,
                 "credibility_score": credibility_score,
                 "final_relevancy_score": event.final_relevancy_score,
@@ -910,6 +919,7 @@ async def ingest_embeddings(
                     if existing:
                         existing.title = item["title"]
                         existing.source = item.get("source")
+                        existing.published_date = item.get("published_date")
                         existing.embedded_text = item["text"]
                         existing.embedding = embedding
                         existing.embedding_model = EMBEDDING_MODEL
@@ -924,6 +934,7 @@ async def ingest_embeddings(
                             publication_id=item["publication_id"],
                             title=item["title"],
                             source=item.get("source"),
+                            published_date=item.get("published_date"),
                             embedded_text=item["text"],
                             embedding=embedding,
                             embedding_model=EMBEDDING_MODEL,
@@ -1058,21 +1069,62 @@ async def search_publications(
 
     # Execute semantic search query
     # Note: Use (:param)::vector syntax to avoid SQLAlchemy parsing issues with ::
+    # JOIN with tri_model_events to get source/published_date from review JSONs
+    # when not available in publication_embeddings
     search_query = text(f"""
-        SELECT
-            publication_id,
-            title,
-            source,
-            published_date,
-            latest_run_id,
-            final_relevancy_score,
-            credibility_score,
-            final_summary,
-            embedding <-> (:query_embedding)::vector AS distance
-        FROM publication_embeddings
-        WHERE {where_sql}
-        ORDER BY embedding <-> (:query_embedding)::vector
-        LIMIT :limit
+        WITH ranked_results AS (
+            SELECT
+                pe.publication_id,
+                pe.title,
+                pe.source,
+                pe.published_date,
+                pe.latest_run_id,
+                pe.final_relevancy_score,
+                pe.credibility_score,
+                pe.final_summary,
+                pe.embedding <-> (:query_embedding)::vector AS distance
+            FROM publication_embeddings pe
+            WHERE {where_sql}
+            ORDER BY pe.embedding <-> (:query_embedding)::vector
+            LIMIT :limit
+        ),
+        enriched_results AS (
+            SELECT
+                rr.publication_id,
+                rr.title,
+                COALESCE(
+                    rr.source,
+                    tme.claude_review_json::jsonb->>'source',
+                    tme.gemini_review_json::jsonb->>'source',
+                    tme.gpt_eval_json::jsonb->>'source'
+                ) AS source,
+                COALESCE(
+                    rr.published_date,
+                    (tme.claude_review_json::jsonb->>'published_date')::timestamp,
+                    (tme.gemini_review_json::jsonb->>'published_date')::timestamp,
+                    (tme.gpt_eval_json::jsonb->>'published_date')::timestamp
+                ) AS published_date,
+                rr.latest_run_id,
+                COALESCE(rr.final_relevancy_score, tme.final_relevancy_score) AS final_relevancy_score,
+                rr.credibility_score,
+                COALESCE(
+                    rr.final_summary,
+                    tme.claude_review_json::jsonb->>'summary',
+                    tme.gemini_review_json::jsonb->>'summary',
+                    tme.gpt_eval_json::jsonb->>'summary'
+                ) AS final_summary,
+                rr.distance
+            FROM ranked_results rr
+            LEFT JOIN LATERAL (
+                SELECT *
+                FROM tri_model_events
+                WHERE publication_id = rr.publication_id
+                ORDER BY created_at DESC
+                LIMIT 1
+            ) tme ON true
+        )
+        SELECT * FROM enriched_results
+        ORDER BY distance
     """)
 
     try:

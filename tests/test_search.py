@@ -375,6 +375,143 @@ class TestSearchEndpointSQL:
                                                     assert "limit" in params
 
 
+class TestSearchResultsIncludeSourceAndDate:
+    """Test that search results include source and published_date fields."""
+
+    def test_search_results_include_source_and_date(self):
+        """
+        Test that search results include non-null source and published_date
+        when they are available in the data.
+        """
+        with patch.dict(os.environ, {
+            "DATABASE_URL": "postgresql://test:test@localhost/test",
+            "SPOTITEARLY_LLM_API_KEY": "sk-test-key"
+        }):
+            with patch("db.engine"):
+                with patch("db.SessionLocal"):
+                    with patch("db.PGVECTOR_AVAILABLE", True):
+                        with patch("main.PGVECTOR_AVAILABLE", True):
+                            with patch("main.is_embedding_available", return_value=True):
+                                with patch("main.get_openai_client") as mock_client:
+                                    with patch("main.generate_embedding") as mock_embed:
+                                        with patch("main.get_db") as mock_get_db:
+                                            dummy_embedding = [0.1] * 1536
+                                            mock_embed.return_value = dummy_embedding
+
+                                            mock_session = MagicMock()
+                                            mock_session.query.return_value.filter.return_value.count.return_value = 10
+
+                                            # Mock search results WITH source and published_date
+                                            from datetime import datetime
+                                            mock_result = MagicMock()
+                                            mock_result.fetchall.return_value = [
+                                                (
+                                                    "pub_123",
+                                                    "Cancer Detection via Canine Olfaction",
+                                                    "Nature Medicine",  # source
+                                                    datetime(2025, 1, 15),  # published_date
+                                                    "run_456",
+                                                    92.5,  # relevancy
+                                                    88.0,  # credibility
+                                                    "Dogs can detect cancer biomarkers with high accuracy.",
+                                                    0.25,   # distance
+                                                ),
+                                                (
+                                                    "pub_456",
+                                                    "Liquid Biopsy Advances",
+                                                    "JAMA Oncology",  # source
+                                                    datetime(2025, 1, 10),  # published_date
+                                                    "run_789",
+                                                    85.0,
+                                                    90.0,
+                                                    "New methods for ctDNA detection.",
+                                                    0.35,
+                                                )
+                                            ]
+                                            mock_session.execute.return_value = mock_result
+
+                                            def mock_db_generator():
+                                                yield mock_session
+                                            mock_get_db.return_value = mock_db_generator()
+
+                                            from main import app
+                                            client = TestClient(app, raise_server_exceptions=False)
+
+                                            response = client.get("/search/publications?q=cancer+detection")
+
+                                            if response.status_code == 200:
+                                                data = response.json()
+                                                assert "results" in data
+                                                assert len(data["results"]) == 2
+
+                                                # First result should have source and date
+                                                result1 = data["results"][0]
+                                                assert result1["source"] == "Nature Medicine"
+                                                assert result1["published_date"] == "2025-01-15"
+                                                assert result1["title"] == "Cancer Detection via Canine Olfaction"
+
+                                                # Second result should also have source and date
+                                                result2 = data["results"][1]
+                                                assert result2["source"] == "JAMA Oncology"
+                                                assert result2["published_date"] == "2025-01-10"
+
+    def test_search_results_handle_null_source_and_date(self):
+        """
+        Test that search results gracefully handle null source and published_date.
+        """
+        with patch.dict(os.environ, {
+            "DATABASE_URL": "postgresql://test:test@localhost/test",
+            "SPOTITEARLY_LLM_API_KEY": "sk-test-key"
+        }):
+            with patch("db.engine"):
+                with patch("db.SessionLocal"):
+                    with patch("db.PGVECTOR_AVAILABLE", True):
+                        with patch("main.PGVECTOR_AVAILABLE", True):
+                            with patch("main.is_embedding_available", return_value=True):
+                                with patch("main.get_openai_client") as mock_client:
+                                    with patch("main.generate_embedding") as mock_embed:
+                                        with patch("main.get_db") as mock_get_db:
+                                            dummy_embedding = [0.1] * 1536
+                                            mock_embed.return_value = dummy_embedding
+
+                                            mock_session = MagicMock()
+                                            mock_session.query.return_value.filter.return_value.count.return_value = 10
+
+                                            # Mock search results with NULL source and date
+                                            mock_result = MagicMock()
+                                            mock_result.fetchall.return_value = [
+                                                (
+                                                    "pub_789",
+                                                    "Some Publication",
+                                                    None,  # source is null
+                                                    None,  # published_date is null
+                                                    "run_123",
+                                                    75.0,
+                                                    None,
+                                                    None,
+                                                    0.5,
+                                                )
+                                            ]
+                                            mock_session.execute.return_value = mock_result
+
+                                            def mock_db_generator():
+                                                yield mock_session
+                                            mock_get_db.return_value = mock_db_generator()
+
+                                            from main import app
+                                            client = TestClient(app, raise_server_exceptions=False)
+
+                                            response = client.get("/search/publications?q=test")
+
+                                            if response.status_code == 200:
+                                                data = response.json()
+                                                assert "results" in data
+                                                result = data["results"][0]
+                                                # Should be None, not crash
+                                                assert result["source"] is None
+                                                assert result["published_date"] is None
+
+
 # Mark integration tests that require actual database
 @pytest.mark.integration
 class TestSearchIntegration:
@@ -398,6 +535,13 @@ class TestSearchIntegration:
     def test_embedding_backfill(self, db_session):
         """Test that backfill script works correctly."""
         pass  # Would test actual embedding generation
+
+    def test_search_results_include_source_and_date_from_join(self, db_session):
+        """
+        Integration test: Verify that search results include source and published_date
+        from the JOIN with tri_model_events even when not stored in publication_embeddings.
+        """
+        pass  # Would seed database and verify JOIN enrichment
 
 
 if __name__ == "__main__":

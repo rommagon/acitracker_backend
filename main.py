@@ -13,6 +13,7 @@ from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, Response, Query, Depends, Security, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, and_, or_, text
 
@@ -81,6 +82,12 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+# Mount static files for serving logo and other assets
+import pathlib
+static_dir = pathlib.Path(__file__).parent / "static"
+if static_dir.exists():
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 # Include calibration router
 app.include_router(calibration_router)

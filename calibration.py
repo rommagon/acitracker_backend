@@ -650,264 +650,483 @@ CALIBRATION_UI_HTML = '''
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AciTracker Calibration Tool</title>
+    <title>Science Agent - Calibration Tool</title>
     <style>
+        :root {
+            --primary: #0066cc;
+            --primary-dark: #004d99;
+            --primary-light: #e6f0ff;
+            --accent: #00a86b;
+            --accent-light: #e6fff5;
+            --warning: #f59e0b;
+            --warning-light: #fef3c7;
+            --error: #dc2626;
+            --error-light: #fef2f2;
+            --success: #22c55e;
+            --success-light: #f0fdf4;
+            --gray-50: #f9fafb;
+            --gray-100: #f3f4f6;
+            --gray-200: #e5e7eb;
+            --gray-500: #6b7280;
+            --gray-700: #374151;
+            --gray-900: #111827;
+            --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+            --shadow: 0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -1px rgba(0,0,0,0.06);
+            --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -2px rgba(0,0,0,0.05);
+            --radius: 12px;
+            --radius-sm: 8px;
+        }
         * {
             box-sizing: border-box;
+            margin: 0;
+            padding: 0;
         }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             max-width: 800px;
             margin: 0 auto;
-            padding: 20px;
-            background: #f5f5f5;
-            color: #333;
+            padding: 24px 16px;
+            background: linear-gradient(135deg, var(--gray-50) 0%, var(--gray-100) 100%);
+            color: var(--gray-900);
+            min-height: 100vh;
+            line-height: 1.6;
+        }
+        .header {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 24px;
+            padding: 20px 24px;
+            background: white;
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+        }
+        .logo {
+            width: 56px;
+            height: 56px;
+            border-radius: var(--radius-sm);
+            object-fit: contain;
+        }
+        .header-text h1 {
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--primary);
+            margin-bottom: 4px;
+        }
+        .header-text .subtitle {
+            font-size: 14px;
+            color: var(--gray-500);
         }
         .card {
             background: white;
-            border-radius: 12px;
-            padding: 24px;
+            border-radius: var(--radius);
+            padding: 28px;
             margin-bottom: 20px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            box-shadow: var(--shadow);
+            border: 1px solid var(--gray-200);
         }
-        h1 {
-            color: #2563eb;
+        .card h2 {
+            font-size: 20px;
+            font-weight: 600;
+            color: var(--gray-900);
+            margin-bottom: 16px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        .form-group label {
+            display: block;
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--gray-700);
             margin-bottom: 8px;
         }
-        .subtitle {
-            color: #666;
-            margin-bottom: 24px;
-        }
-        .setup-form {
-            display: flex;
-            gap: 12px;
-            align-items: center;
-        }
-        .setup-form input {
-            flex: 1;
-            padding: 12px;
-            border: 2px solid #e5e7eb;
-            border-radius: 8px;
+        input[type="text"],
+        input[type="password"] {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid var(--gray-200);
+            border-radius: var(--radius-sm);
             font-size: 16px;
+            transition: border-color 0.2s, box-shadow 0.2s;
         }
-        .setup-form input:focus {
+        input[type="text"]:focus,
+        input[type="password"]:focus {
             outline: none;
-            border-color: #2563eb;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px var(--primary-light);
         }
-        button {
-            background: #2563eb;
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            background: var(--primary);
             color: white;
             border: none;
             padding: 12px 24px;
-            border-radius: 8px;
+            border-radius: var(--radius-sm);
             font-size: 16px;
+            font-weight: 500;
             cursor: pointer;
-            transition: background 0.2s;
+            transition: all 0.2s;
         }
-        button:hover {
-            background: #1d4ed8;
+        .btn:hover {
+            background: var(--primary-dark);
+            transform: translateY(-1px);
+            box-shadow: var(--shadow);
         }
-        button:disabled {
-            background: #9ca3af;
+        .btn:active {
+            transform: translateY(0);
+        }
+        .btn:disabled {
+            background: var(--gray-200);
+            color: var(--gray-500);
             cursor: not-allowed;
+            transform: none;
+        }
+        .btn-secondary {
+            background: var(--gray-100);
+            color: var(--gray-700);
+        }
+        .btn-secondary:hover {
+            background: var(--gray-200);
+        }
+        .paper-card {
+            border-left: 4px solid var(--primary);
         }
         .paper-title {
             font-size: 20px;
             font-weight: 600;
+            color: var(--gray-900);
             margin-bottom: 12px;
             line-height: 1.4;
         }
         .paper-meta {
-            color: #666;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 16px;
+            color: var(--gray-500);
             font-size: 14px;
-            margin-bottom: 16px;
+            margin-bottom: 20px;
         }
         .paper-meta span {
-            margin-right: 16px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
         }
         .divider {
-            border-top: 1px solid #e5e7eb;
-            margin: 20px 0;
+            border: none;
+            border-top: 1px solid var(--gray-200);
+            margin: 24px 0;
         }
         .summary-section h3 {
-            font-size: 14px;
+            font-size: 12px;
+            font-weight: 600;
             text-transform: uppercase;
-            color: #666;
-            margin-bottom: 8px;
+            letter-spacing: 0.5px;
+            color: var(--gray-500);
+            margin-bottom: 12px;
         }
         .summary-text {
-            line-height: 1.6;
-            color: #444;
-        }
-        .rating-section {
-            margin-top: 24px;
-        }
-        .rating-section label {
-            display: block;
-            font-weight: 500;
-            margin-bottom: 8px;
+            font-size: 15px;
+            line-height: 1.7;
+            color: var(--gray-700);
+            background: var(--gray-50);
+            padding: 16px;
+            border-radius: var(--radius-sm);
         }
         .slider-container {
             display: flex;
             align-items: center;
-            gap: 16px;
-            margin-bottom: 20px;
+            gap: 20px;
         }
         .slider-container input[type="range"] {
             flex: 1;
             height: 8px;
             -webkit-appearance: none;
-            background: linear-gradient(to right, #ef4444 0%, #f59e0b 50%, #22c55e 100%);
+            appearance: none;
+            background: linear-gradient(to right, var(--error) 0%, var(--warning) 50%, var(--success) 100%);
             border-radius: 4px;
+            cursor: pointer;
         }
         .slider-container input[type="range"]::-webkit-slider-thumb {
             -webkit-appearance: none;
-            width: 24px;
-            height: 24px;
+            width: 28px;
+            height: 28px;
             background: white;
-            border: 2px solid #2563eb;
+            border: 3px solid var(--primary);
             border-radius: 50%;
             cursor: pointer;
+            box-shadow: var(--shadow);
+            transition: transform 0.2s;
+        }
+        .slider-container input[type="range"]::-webkit-slider-thumb:hover {
+            transform: scale(1.1);
+        }
+        .slider-container input[type="range"]::-moz-range-thumb {
+            width: 28px;
+            height: 28px;
+            background: white;
+            border: 3px solid var(--primary);
+            border-radius: 50%;
+            cursor: pointer;
+            box-shadow: var(--shadow);
         }
         .score-display {
-            font-size: 24px;
+            font-size: 28px;
             font-weight: 700;
-            color: #2563eb;
+            color: var(--primary);
             min-width: 60px;
             text-align: center;
+            background: var(--primary-light);
+            padding: 8px 16px;
+            border-radius: var(--radius-sm);
         }
         textarea {
             width: 100%;
-            padding: 12px;
-            border: 2px solid #e5e7eb;
-            border-radius: 8px;
-            font-size: 16px;
+            padding: 14px 16px;
+            border: 2px solid var(--gray-200);
+            border-radius: var(--radius-sm);
+            font-size: 15px;
             font-family: inherit;
             resize: vertical;
             min-height: 100px;
+            line-height: 1.6;
+            transition: border-color 0.2s, box-shadow 0.2s;
         }
         textarea:focus {
             outline: none;
-            border-color: #2563eb;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px var(--primary-light);
         }
         select {
-            padding: 12px;
-            border: 2px solid #e5e7eb;
-            border-radius: 8px;
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid var(--gray-200);
+            border-radius: var(--radius-sm);
             font-size: 16px;
             background: white;
-            min-width: 150px;
+            cursor: pointer;
+            transition: border-color 0.2s;
         }
         select:focus {
             outline: none;
-            border-color: #2563eb;
-        }
-        .form-row {
-            margin-bottom: 20px;
+            border-color: var(--primary);
         }
         .result-card {
-            background: #f0fdf4;
-            border: 2px solid #22c55e;
+            background: var(--success-light);
+            border: 2px solid var(--success);
+            text-align: center;
         }
         .result-card.mismatch {
-            background: #fef3c7;
-            border-color: #f59e0b;
+            background: var(--warning-light);
+            border-color: var(--warning);
+        }
+        .result-card h2 {
+            color: var(--success);
+        }
+        .result-card.mismatch h2 {
+            color: var(--warning);
         }
         .score-comparison {
             display: flex;
-            gap: 40px;
-            margin: 20px 0;
+            justify-content: center;
+            gap: 48px;
+            margin: 28px 0;
         }
         .score-box {
             text-align: center;
         }
         .score-box .label {
-            font-size: 14px;
-            color: #666;
-            margin-bottom: 4px;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--gray-500);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
         }
         .score-box .value {
-            font-size: 32px;
+            font-size: 40px;
             font-weight: 700;
         }
         .score-box.human .value {
-            color: #2563eb;
+            color: var(--primary);
         }
         .score-box.llm .value {
-            color: #7c3aed;
+            color: var(--accent);
         }
         .hidden {
-            display: none;
+            display: none !important;
         }
         .loading {
             text-align: center;
-            padding: 40px;
-            color: #666;
+            padding: 48px 24px;
+            color: var(--gray-500);
+        }
+        .loading::before {
+            content: "";
+            display: block;
+            width: 40px;
+            height: 40px;
+            margin: 0 auto 16px;
+            border: 3px solid var(--gray-200);
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
         }
         .done-card {
             text-align: center;
-            padding: 40px;
+            padding: 48px 24px;
         }
         .done-card h2 {
-            color: #22c55e;
+            color: var(--success);
+            font-size: 28px;
+            margin-bottom: 12px;
+        }
+        .done-card p {
+            color: var(--gray-500);
+            margin-bottom: 24px;
         }
         .stats {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
             gap: 16px;
-            margin-top: 20px;
+            margin: 24px 0;
         }
         .stat-box {
             text-align: center;
-            padding: 16px;
-            background: #f9fafb;
-            border-radius: 8px;
+            padding: 20px 16px;
+            background: var(--gray-50);
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--gray-200);
         }
         .stat-box .value {
-            font-size: 24px;
+            font-size: 28px;
             font-weight: 700;
-            color: #2563eb;
+            color: var(--primary);
         }
         .stat-box .label {
-            font-size: 12px;
-            color: #666;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--gray-500);
             text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-top: 4px;
         }
         .gold-badge {
-            background: #fef3c7;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            background: var(--warning-light);
             color: #92400e;
-            padding: 4px 8px;
-            border-radius: 4px;
+            padding: 6px 12px;
+            border-radius: 20px;
             font-size: 12px;
             font-weight: 600;
         }
         .error {
-            color: #dc2626;
-            padding: 12px;
-            background: #fef2f2;
-            border-radius: 8px;
+            color: var(--error);
+            padding: 14px 16px;
+            background: var(--error-light);
+            border-radius: var(--radius-sm);
             margin-bottom: 16px;
+            font-size: 14px;
+            border: 1px solid var(--error);
+        }
+        .api-key-section {
+            background: var(--gray-50);
+            padding: 16px;
+            border-radius: var(--radius-sm);
+            margin-bottom: 20px;
+            border: 1px solid var(--gray-200);
+        }
+        .api-key-section label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            color: var(--gray-500);
+            margin-bottom: 8px;
+        }
+        .api-key-section input {
+            font-size: 14px;
+            padding: 10px 14px;
+        }
+        .api-key-status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            margin-top: 8px;
+        }
+        .api-key-status.valid {
+            color: var(--success);
+        }
+        .api-key-status.invalid {
+            color: var(--error);
+        }
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: currentColor;
+        }
+        @media (max-width: 600px) {
+            body {
+                padding: 16px 12px;
+            }
+            .header {
+                flex-direction: column;
+                text-align: center;
+            }
+            .score-comparison {
+                gap: 24px;
+            }
+            .stats {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
 <body>
-    <div class="card">
-        <h1>AciTracker Calibration</h1>
-        <p class="subtitle">Help calibrate our AI relevancy scoring by rating publications</p>
+    <div class="header">
+        <img src="/static/logo.png" alt="Science Agent Logo" class="logo" onerror="this.style.display='none'">
+        <div class="header-text">
+            <h1>Science Agent Calibration</h1>
+            <p class="subtitle">Help calibrate AI relevancy scoring by rating publications</p>
+        </div>
     </div>
 
     <!-- Setup Section -->
     <div id="setup-section" class="card">
         <h2>Welcome!</h2>
-        <p>Enter your name or email to get started:</p>
-        <div class="setup-form">
-            <input type="text" id="evaluator-input" placeholder="Your name or email">
-            <button onclick="startCalibration()">Start Rating</button>
+        <div class="api-key-section">
+            <label>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                </svg>
+                API Key (required)
+            </label>
+            <input type="password" id="api-key-input" placeholder="Enter your API key">
+            <div id="api-key-status" class="api-key-status hidden">
+                <span class="status-dot"></span>
+                <span class="status-text"></span>
+            </div>
         </div>
+        <div class="form-group">
+            <label>Your Name or Email</label>
+            <input type="text" id="evaluator-input" placeholder="e.g., john@example.com">
+        </div>
+        <button class="btn" onclick="startCalibration()">Start Rating</button>
     </div>
 
     <!-- Rating Section -->
-    <div id="rating-section" class="card hidden">
+    <div id="rating-section" class="card paper-card hidden">
         <div id="loading" class="loading">Loading next paper...</div>
         <div id="paper-content" class="hidden">
             <div class="paper-title" id="paper-title"></div>
@@ -916,41 +1135,39 @@ CALIBRATION_UI_HTML = '''
                 <span id="paper-date"></span>
                 <span id="gold-badge" class="gold-badge hidden">⭐ Gold Standard</span>
             </div>
-            <div class="divider"></div>
+            <hr class="divider">
             <div class="summary-section">
                 <h3>AI Summary</h3>
                 <p class="summary-text" id="paper-summary"></p>
             </div>
-            <div class="divider"></div>
-            <div class="rating-section">
-                <div class="form-row">
-                    <label>Relevancy Score (0-100)</label>
-                    <div class="slider-container">
-                        <input type="range" id="score-slider" min="0" max="100" value="50" oninput="updateScoreDisplay()">
-                        <div class="score-display" id="score-display">50</div>
-                    </div>
+            <hr class="divider">
+            <div class="form-group">
+                <label>Relevancy Score (0-100)</label>
+                <div class="slider-container">
+                    <input type="range" id="score-slider" min="0" max="100" value="50" oninput="updateScoreDisplay()">
+                    <div class="score-display" id="score-display">50</div>
                 </div>
-                <div class="form-row">
-                    <label>Reasoning (1-3 sentences)</label>
-                    <textarea id="reasoning" placeholder="Why did you give this score?"></textarea>
-                </div>
-                <div class="form-row">
-                    <label>Confidence</label>
-                    <select id="confidence">
-                        <option value="">Select...</option>
-                        <option value="high">High - I'm very sure</option>
-                        <option value="medium">Medium - Fairly confident</option>
-                        <option value="low">Low - Uncertain</option>
-                    </select>
-                </div>
-                <div id="error-message" class="error hidden"></div>
-                <button id="submit-btn" onclick="submitRating()">Submit Rating</button>
             </div>
+            <div class="form-group">
+                <label>Reasoning (1-3 sentences)</label>
+                <textarea id="reasoning" placeholder="Why did you give this score? What factors influenced your decision?"></textarea>
+            </div>
+            <div class="form-group">
+                <label>Confidence Level</label>
+                <select id="confidence">
+                    <option value="">Select your confidence...</option>
+                    <option value="high">High - I'm very confident</option>
+                    <option value="medium">Medium - Fairly confident</option>
+                    <option value="low">Low - Uncertain</option>
+                </select>
+            </div>
+            <div id="error-message" class="error hidden"></div>
+            <button id="submit-btn" class="btn" onclick="submitRating()">Submit Rating</button>
         </div>
     </div>
 
     <!-- Result Section -->
-    <div id="result-section" class="card hidden">
+    <div id="result-section" class="card result-card hidden">
         <h2>Thanks for your rating!</h2>
         <div class="score-comparison">
             <div class="score-box human">
@@ -962,25 +1179,32 @@ CALIBRATION_UI_HTML = '''
                 <div class="value" id="result-llm-score"></div>
             </div>
         </div>
-        <button onclick="loadNextPaper()">Next Paper →</button>
+        <button class="btn" onclick="loadNextPaper()">Next Paper →</button>
     </div>
 
     <!-- Done Section -->
     <div id="done-section" class="card done-card hidden">
-        <h2>🎉 All Done!</h2>
-        <p>You've rated all available papers. Thank you!</p>
+        <h2>All Done!</h2>
+        <p>You've rated all available papers. Thank you for your contributions!</p>
         <div class="stats" id="user-stats"></div>
-        <button onclick="location.reload()" style="margin-top: 20px;">Refresh to Check for New Papers</button>
+        <button class="btn btn-secondary" onclick="location.reload()">Refresh to Check for New Papers</button>
     </div>
 
     <script>
-        const API_KEY = localStorage.getItem('acitrack_api_key') || '';
+        // State
+        let apiKey = localStorage.getItem('science_agent_api_key') || '';
         let evaluator = localStorage.getItem('calibration_evaluator') || '';
         let currentItem = null;
 
+        // Initialize inputs from localStorage
+        document.getElementById('api-key-input').value = apiKey;
+        document.getElementById('evaluator-input').value = evaluator;
+
         function getHeaders() {
             const headers = {'Content-Type': 'application/json'};
-            if (API_KEY) headers['X-API-Key'] = API_KEY;
+            if (apiKey) {
+                headers['X-API-Key'] = apiKey;
+            }
             return headers;
         }
 
@@ -996,16 +1220,36 @@ CALIBRATION_UI_HTML = '''
             document.getElementById(sectionId).classList.remove('hidden');
         }
 
-        function startCalibration() {
-            const input = document.getElementById('evaluator-input');
-            evaluator = input.value.trim();
-            if (!evaluator) {
+        function showApiKeyStatus(isValid, message) {
+            const statusEl = document.getElementById('api-key-status');
+            statusEl.classList.remove('hidden', 'valid', 'invalid');
+            statusEl.classList.add(isValid ? 'valid' : 'invalid');
+            statusEl.querySelector('.status-text').textContent = message;
+        }
+
+        async function startCalibration() {
+            const apiKeyInput = document.getElementById('api-key-input').value.trim();
+            const evaluatorInput = document.getElementById('evaluator-input').value.trim();
+
+            // Validate inputs
+            if (!apiKeyInput) {
+                showApiKeyStatus(false, 'API key is required');
+                return;
+            }
+            if (!evaluatorInput) {
                 alert('Please enter your name or email');
                 return;
             }
+
+            // Store values
+            apiKey = apiKeyInput;
+            evaluator = evaluatorInput;
+            localStorage.setItem('science_agent_api_key', apiKey);
             localStorage.setItem('calibration_evaluator', evaluator);
+
+            // Test API key by making a request
             showSection('rating-section');
-            loadNextPaper();
+            await loadNextPaper();
         }
 
         async function loadNextPaper() {
@@ -1019,8 +1263,20 @@ CALIBRATION_UI_HTML = '''
                     headers: getHeaders()
                 });
 
+                if (response.status === 401) {
+                    showSection('setup-section');
+                    showApiKeyStatus(false, 'Invalid API key. Please check and try again.');
+                    return;
+                }
+
+                if (response.status === 403) {
+                    showSection('setup-section');
+                    showApiKeyStatus(false, 'Access denied. API key does not have permission.');
+                    return;
+                }
+
                 if (!response.ok) {
-                    throw new Error('Failed to load paper');
+                    throw new Error(`Server error: ${response.status}`);
                 }
 
                 const data = await response.json();
@@ -1037,7 +1293,8 @@ CALIBRATION_UI_HTML = '''
             } catch (error) {
                 console.error('Error loading paper:', error);
                 document.getElementById('loading').innerHTML =
-                    '<p class="error">Error loading paper. Please refresh and try again.</p>';
+                    '<div class="error">Error loading paper. Please check your connection and try again.</div>' +
+                    '<button class="btn btn-secondary" onclick="loadNextPaper()" style="margin-top: 16px;">Retry</button>';
             }
         }
 
@@ -1092,6 +1349,12 @@ CALIBRATION_UI_HTML = '''
                     })
                 });
 
+                if (response.status === 401 || response.status === 403) {
+                    showSection('setup-section');
+                    showApiKeyStatus(false, 'Session expired. Please enter your API key again.');
+                    return;
+                }
+
                 if (!response.ok) {
                     const error = await response.json();
                     throw new Error(error.detail || 'Failed to submit');
@@ -1135,30 +1398,35 @@ CALIBRATION_UI_HTML = '''
                 const response = await fetch(`/calibration/stats?evaluator=${encodeURIComponent(evaluator)}`, {
                     headers: getHeaders()
                 });
+
+                if (!response.ok) {
+                    throw new Error('Failed to load stats');
+                }
+
                 const stats = await response.json();
 
                 document.getElementById('user-stats').innerHTML = `
                     <div class="stat-box">
-                        <div class="value">${stats.total_rated}</div>
+                        <div class="value">${stats.total_rated || 0}</div>
                         <div class="label">Papers Rated</div>
                     </div>
                     <div class="stat-box">
-                        <div class="value">${stats.avg_score || 'N/A'}</div>
+                        <div class="value">${stats.avg_score !== null ? stats.avg_score : 'N/A'}</div>
                         <div class="label">Avg Score</div>
                     </div>
                     <div class="stat-box">
-                        <div class="value">${stats.gold_rated}/${stats.gold_total}</div>
+                        <div class="value">${stats.gold_rated || 0}/${stats.gold_total || 0}</div>
                         <div class="label">Gold Rated</div>
                     </div>
                 `;
             } catch (error) {
                 console.error('Error loading stats:', error);
+                document.getElementById('user-stats').innerHTML = '<p>Unable to load statistics.</p>';
             }
         }
 
-        // Initialize
-        if (evaluator) {
-            document.getElementById('evaluator-input').value = evaluator;
+        // Auto-start if we have saved credentials
+        if (apiKey && evaluator) {
             startCalibration();
         }
     </script>

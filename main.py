@@ -595,12 +595,29 @@ async def ingest_run(
 
 
 # POST /ingest/tri-model-events
+
+# POST /ingest/tri-model-events
+
+def normalize_disagreements(d):
+    """Ensure disagreements is always a list[str] for Postgres TEXT[] storage."""
+    if d is None:
+        return []
+    if isinstance(d, str):
+        s = d.strip().lower()
+        if s in ("none", "null", ""):
+            return []
+        return [d]
+    if isinstance(d, list):
+        return d
+    return [str(d)]
+
 @app.post("/ingest/tri-model-events")
 async def ingest_tri_model_events(
     payload: Dict[str, Any],
     db: Session = Depends(get_db),
     api_key: str = Depends(verify_api_key)
 ):
+    ...
     """
     Bulk upsert tri-model events (idempotent by run_id + publication_id).
 
@@ -644,6 +661,7 @@ async def ingest_tri_model_events(
     now = datetime.utcnow()
 
     for event_data in events:
+        event_data["disagreements"] = normalize_disagreements(event_data.get("disagreements"))
         publication_id = event_data.get("publication_id")
         if not publication_id:
             continue

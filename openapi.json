@@ -466,6 +466,211 @@
           }
         }
       }
+    },
+    "/calibration/items/seed": {
+      "post": {
+        "operationId": "seedCalibrationItems",
+        "summary": "Seed calibration items",
+        "description": "Seed calibration items from a list of publication IDs for human labeling",
+        "security": [{"ApiKeyAuth": []}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SeedItemsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Seeding result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "seeded": {"type": "integer"},
+                    "skipped_existing": {"type": "integer"}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/calibration/items/seed-mustreads": {
+      "post": {
+        "operationId": "seedMustReads",
+        "summary": "Seed must-reads for calibration",
+        "description": "Seed calibration items from the latest run's must-reads",
+        "security": [{"ApiKeyAuth": []}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "run_id": {"type": "string"},
+                  "mode": {"type": "string", "default": "tri-model-daily"},
+                  "tags": {"type": "object"}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Seeding result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "seeded": {"type": "integer"},
+                    "skipped_existing": {"type": "integer"}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/calibration/next": {
+      "get": {
+        "operationId": "getNextCalibrationItem",
+        "summary": "Get next item to rate",
+        "description": "Get the next calibration item for an evaluator to rate",
+        "security": [{"ApiKeyAuth": []}],
+        "parameters": [
+          {
+            "name": "evaluator",
+            "in": "query",
+            "required": true,
+            "schema": {"type": "string"}
+          },
+          {
+            "name": "strategy",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["balanced", "gold_first", "random"],
+              "default": "balanced"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Next calibration item or null",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CalibrationItem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/calibration/submit": {
+      "post": {
+        "operationId": "submitCalibrationRating",
+        "summary": "Submit a rating",
+        "description": "Submit a human evaluation for a calibration item",
+        "security": [{"ApiKeyAuth": []}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitEvaluationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Submission result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {"type": "string"},
+                    "llm_score": {"type": "number"}
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Already rated this item"
+          }
+        }
+      }
+    },
+    "/calibration/stats": {
+      "get": {
+        "operationId": "getCalibrationStats",
+        "summary": "Get calibration statistics",
+        "description": "Get statistics about calibration progress",
+        "security": [{"ApiKeyAuth": []}],
+        "parameters": [
+          {
+            "name": "evaluator",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "string"}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Calibration statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CalibrationStats"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/calibration/export": {
+      "get": {
+        "operationId": "exportCalibrationData",
+        "summary": "Export calibration data",
+        "description": "Export all calibration data as CSV or JSON lines",
+        "security": [{"ApiKeyAuth": []}],
+        "parameters": [
+          {
+            "name": "format",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["csv", "jsonl"],
+              "default": "csv"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Export file",
+            "content": {
+              "text/csv": {},
+              "application/x-ndjson": {}
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -730,6 +935,136 @@
           }
         },
         "required": ["detail"]
+      },
+      "SeedItemsRequest": {
+        "type": "object",
+        "required": ["publication_ids"],
+        "properties": {
+          "publication_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "List of publication IDs to seed for calibration"
+          },
+          "mode": {
+            "type": "string",
+            "description": "Run mode (e.g., tri-model-daily)"
+          },
+          "tags": {
+            "type": "object",
+            "description": "Tags to apply to seeded items (e.g., {\"gold\": true})"
+          }
+        }
+      },
+      "SubmitEvaluationRequest": {
+        "type": "object",
+        "required": ["calibration_item_id", "evaluator", "human_score", "reasoning"],
+        "properties": {
+          "calibration_item_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "UUID of the calibration item being rated"
+          },
+          "evaluator": {
+            "type": "string",
+            "description": "Name/identifier of the evaluator"
+          },
+          "human_score": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Human relevancy score (0-100)"
+          },
+          "reasoning": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Explanation for the score"
+          },
+          "confidence": {
+            "type": "string",
+            "enum": ["low", "medium", "high"],
+            "description": "Evaluator's confidence level"
+          }
+        }
+      },
+      "CalibrationItem": {
+        "type": "object",
+        "properties": {
+          "calibration_item_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Unique identifier for the calibration item"
+          },
+          "publication_id": {
+            "type": "string",
+            "description": "Publication identifier"
+          },
+          "title": {
+            "type": "string",
+            "description": "Publication title"
+          },
+          "source": {
+            "type": "string",
+            "description": "Publication source/journal"
+          },
+          "published_date": {
+            "type": "string",
+            "format": "date",
+            "description": "Publication date"
+          },
+          "abstract": {
+            "type": "string",
+            "description": "Publication abstract"
+          },
+          "final_summary": {
+            "type": "string",
+            "description": "LLM-generated summary"
+          },
+          "run_id": {
+            "type": "string",
+            "description": "Run ID where this publication was evaluated"
+          },
+          "mode": {
+            "type": "string",
+            "description": "Run mode"
+          },
+          "tags": {
+            "type": "object",
+            "description": "Tags for categorization"
+          }
+        }
+      },
+      "CalibrationStats": {
+        "type": "object",
+        "properties": {
+          "total_items": {
+            "type": "integer",
+            "description": "Total calibration items"
+          },
+          "total_rated": {
+            "type": "integer",
+            "description": "Total items with at least one rating"
+          },
+          "gold_total": {
+            "type": "integer",
+            "description": "Total gold-tagged items"
+          },
+          "gold_rated": {
+            "type": "integer",
+            "description": "Gold items with ratings"
+          },
+          "evaluator_count": {
+            "type": "integer",
+            "description": "Number of unique evaluators"
+          },
+          "by_evaluator": {
+            "type": "object",
+            "description": "Counts per evaluator"
+          },
+          "score_buckets": {
+            "type": "object",
+            "description": "Distribution of items by LLM score bucket"
+          }
+        }
       }
     }
   }

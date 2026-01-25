@@ -38,6 +38,7 @@ from embeddings import (
     EmbeddingError,
     EMBEDDING_MODEL,
 )
+from calibration import router as calibration_router
 
 # Configure logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
@@ -80,6 +81,9 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+# Include calibration router
+app.include_router(calibration_router)
 
 # API Key configuration
 ACITRACK_API_KEY = os.getenv("ACITRACK_API_KEY")

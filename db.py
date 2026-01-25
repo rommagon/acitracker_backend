@@ -19,7 +19,11 @@ from sqlalchemy import (
     Text,
     Index,
     text,
+    ForeignKey,
+    UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import UUID, JSONB
+import uuid
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from sqlalchemy.pool import NullPool
 
@@ -213,6 +217,61 @@ class PublicationEmbedding(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class CalibrationItem(Base):
+    """
+    Stores publications for human calibration/labeling.
+    One row per unique publication to be rated.
+    """
+    __tablename__ = "calibration_items"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    publication_id = Column(String, nullable=False, unique=True, index=True)
+    mode = Column(String, nullable=True)  # tri-model-daily, etc.
+    run_id = Column(String, nullable=True)
+
+    # Display metadata
+    source = Column(String, nullable=True)
+    published_date = Column(DateTime, nullable=True)
+    title = Column(Text, nullable=True)
+    abstract = Column(Text, nullable=True)
+
+    # LLM scores for comparison
+    final_relevancy_score = Column(Float, nullable=True)
+    final_summary = Column(Text, nullable=True)
+
+    # Tags for categorization (e.g., {"gold": true, "topic": "breast"})
+    tags = Column(JSONB, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class HumanEvaluation(Base):
+    """
+    Stores human ratings for calibration items.
+    One rating per evaluator per publication.
+    """
+    __tablename__ = "human_evaluations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    calibration_item_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("calibration_items.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
+    )
+    evaluator = Column(String, nullable=False, index=True)
+    human_score = Column(Integer, nullable=False)  # 0-100
+    reasoning = Column(Text, nullable=False)
+    confidence = Column(String, nullable=True)  # low/medium/high
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("calibration_item_id", "evaluator", name="uq_calibration_evaluator"),
+    )
 
 
 def get_db() -> Session:

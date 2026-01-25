@@ -1057,7 +1057,8 @@ async def search_publications(
     where_sql = " AND ".join(where_clauses)
 
     # Execute semantic search query
-    search_query = f"""
+    # Note: Use (:param)::vector syntax to avoid SQLAlchemy parsing issues with ::
+    search_query = text(f"""
         SELECT
             publication_id,
             title,
@@ -1067,15 +1068,15 @@ async def search_publications(
             final_relevancy_score,
             credibility_score,
             final_summary,
-            embedding <-> :query_embedding::vector AS distance
+            embedding <-> (:query_embedding)::vector AS distance
         FROM publication_embeddings
         WHERE {where_sql}
-        ORDER BY embedding <-> :query_embedding::vector
+        ORDER BY embedding <-> (:query_embedding)::vector
         LIMIT :limit
-    """
+    """)
 
     try:
-        result = db.execute(text(search_query), params)
+        result = db.execute(search_query, params)
         rows = result.fetchall()
     except Exception as e:
         logger.error(f"Search query failed: {e}")

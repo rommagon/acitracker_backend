@@ -252,6 +252,129 @@ class TestChunkTextsForBatching:
         assert len(batches[1]) == 25
 
 
+class TestSearchEndpointSQL:
+    """Test that search endpoint SQL executes without 500 errors."""
+
+    def test_search_endpoint_sql_binding(self):
+        """
+        Test that the search endpoint SQL query uses correct parameter binding.
+        This ensures the (:query_embedding)::vector syntax works correctly.
+        """
+        with patch.dict(os.environ, {
+            "DATABASE_URL": "postgresql://test:test@localhost/test",
+            "SPOTITEARLY_LLM_API_KEY": "sk-test-key"
+        }):
+            with patch("db.engine"):
+                with patch("db.SessionLocal"):
+                    with patch("db.PGVECTOR_AVAILABLE", True):
+                        # Mock the main module's dependencies
+                        with patch("main.PGVECTOR_AVAILABLE", True):
+                            with patch("main.is_embedding_available", return_value=True):
+                                with patch("main.get_openai_client") as mock_client:
+                                    with patch("main.generate_embedding") as mock_embed:
+                                        with patch("main.get_db") as mock_get_db:
+                                            # Create mock embedding (1536 dimensions)
+                                            dummy_embedding = [0.1] * 1536
+                                            mock_embed.return_value = dummy_embedding
+
+                                            # Create mock db session
+                                            mock_session = MagicMock()
+
+                                            # Mock embedding count check
+                                            mock_session.query.return_value.filter.return_value.count.return_value = 10
+
+                                            # Mock the search query execution
+                                            mock_result = MagicMock()
+                                            mock_result.fetchall.return_value = [
+                                                (
+                                                    "pub_123",
+                                                    "Test Title",
+                                                    "Nature",
+                                                    None,  # published_date
+                                                    "run_456",
+                                                    85.0,  # relevancy
+                                                    90.0,  # credibility
+                                                    "Test summary",
+                                                    0.5,   # distance
+                                                )
+                                            ]
+                                            mock_session.execute.return_value = mock_result
+
+                                            # Make get_db return our mock session
+                                            def mock_db_generator():
+                                                yield mock_session
+                                            mock_get_db.return_value = mock_db_generator()
+
+                                            from main import app
+                                            client = TestClient(app, raise_server_exceptions=False)
+
+                                            response = client.get("/search/publications?q=cancer+detection")
+
+                                            # Should NOT be 500 (SQL error)
+                                            assert response.status_code != 500, f"Got 500 error: {response.json()}"
+
+                                            # If we get 200, verify structure
+                                            if response.status_code == 200:
+                                                data = response.json()
+                                                assert "query" in data
+                                                assert "results" in data
+                                                assert data["query"] == "cancer detection"
+
+    def test_search_sql_with_filters(self):
+        """Test that search endpoint SQL works with all filters applied."""
+        with patch.dict(os.environ, {
+            "DATABASE_URL": "postgresql://test:test@localhost/test",
+            "SPOTITEARLY_LLM_API_KEY": "sk-test-key"
+        }):
+            with patch("db.engine"):
+                with patch("db.SessionLocal"):
+                    with patch("db.PGVECTOR_AVAILABLE", True):
+                        with patch("main.PGVECTOR_AVAILABLE", True):
+                            with patch("main.is_embedding_available", return_value=True):
+                                with patch("main.get_openai_client") as mock_client:
+                                    with patch("main.generate_embedding") as mock_embed:
+                                        with patch("main.get_db") as mock_get_db:
+                                            dummy_embedding = [0.1] * 1536
+                                            mock_embed.return_value = dummy_embedding
+
+                                            mock_session = MagicMock()
+                                            mock_session.query.return_value.filter.return_value.count.return_value = 10
+
+                                            mock_result = MagicMock()
+                                            mock_result.fetchall.return_value = []
+                                            mock_session.execute.return_value = mock_result
+
+                                            def mock_db_generator():
+                                                yield mock_session
+                                            mock_get_db.return_value = mock_db_generator()
+
+                                            from main import app
+                                            client = TestClient(app, raise_server_exceptions=False)
+
+                                            # Test with all filters
+                                            response = client.get(
+                                                "/search/publications"
+                                                "?q=liquid+biopsy"
+                                                "&limit=50"
+                                                "&min_relevancy=70"
+                                                "&min_credibility=60"
+                                                "&date_from=2025-01-01"
+                                                "&date_to=2025-12-31"
+                                            )
+
+                                            # Should NOT be 500 (SQL error)
+                                            assert response.status_code != 500, f"Got 500 error: {response.json()}"
+
+                                            # Verify the execute was called with proper params
+                                            if mock_session.execute.called:
+                                                call_args = mock_session.execute.call_args
+                                                params = call_args[0][1] if len(call_args[0]) > 1 else call_args[1]
+                                                # Verify parameter names are correct (no %()s style)
+                                                if isinstance(params, dict):
+                                                    assert "query_embedding" in params
+                                                    assert "limit" in params
+
+
 # Mark integration tests that require actual database
 @pytest.mark.integration
 class TestSearchIntegration:

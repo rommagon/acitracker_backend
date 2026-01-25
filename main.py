@@ -24,6 +24,18 @@ from db import (
     Run,
     TriModelEvent,
     MustRead,
+    PublicationEmbedding,
+    EMBEDDING_DIMENSION,
+    PGVECTOR_AVAILABLE,
+)
+from embeddings import (
+    get_openai_client,
+    build_embedding_text,
+    generate_embedding,
+    generate_embeddings_batch,
+    is_embedding_available,
+    EmbeddingError,
+    EMBEDDING_MODEL,
 )
 
 # Configure logging
@@ -37,8 +49,8 @@ logger = logging.getLogger(__name__)
 # Initialize FastAPI app
 app = FastAPI(
     title="AciTrack API",
-    description="API for accessing academic publication data from Postgres database",
-    version="2.0.0",
+    description="API for accessing academic publication data from Postgres database with semantic search",
+    version="2.1.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -108,8 +120,8 @@ async def root():
     """
     return {
         "name": "AciTrack API",
-        "version": "2.0.0",
-        "description": "Postgres-backed API for academic publication tracking",
+        "version": "2.1.0",
+        "description": "Postgres-backed API for academic publication tracking with semantic search",
         "endpoints": {
             "health": "/health",
             "runs": {
@@ -119,10 +131,15 @@ async def root():
             "must_reads": "/must-reads?mode=...&run_id=...",
             "paper": "/paper/{publication_id}?run_id=...",
             "disagreements": "/disagreements?run_id=...&agreement=low,moderate&min_delta=20",
+            "search": {
+                "publications": "/search/publications?q=...&limit=20&min_relevancy=&min_credibility=&date_from=&date_to=",
+                "status": "/search/status"
+            },
             "ingest": {
                 "run": "POST /ingest/run",
                 "tri_model_events": "POST /ingest/tri-model-events",
-                "must_reads": "POST /ingest/must-reads"
+                "must_reads": "POST /ingest/must-reads",
+                "embeddings": "POST /ingest/embeddings"
             }
         },
         "docs": "/docs"
@@ -734,6 +751,405 @@ async def ingest_must_reads(
         "mode": must_read.mode,
         "created_at": must_read.created_at.isoformat(),
         "updated_at": must_read.updated_at.isoformat()
+    }
+
+
+# POST /ingest/embeddings - Generate embeddings for a run's publications
+@app.post("/ingest/embeddings")
+async def ingest_embeddings(
+    payload: Dict[str, Any],
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    Generate embeddings for publications from a specific run.
+
+    This endpoint is designed to be called after /ingest/tri-model-events
+    to generate embeddings for new publications.
+
+    Request Body:
+    {
+        "run_id": "...",         # Required: run_id to process
+        "limit": 100,            # Optional: max publications to process (default: all)
+        "force_regenerate": false # Optional: regenerate existing embeddings
+    }
+
+    Returns:
+        Summary of embedding generation results
+    """
+    run_id = payload.get("run_id")
+    limit = payload.get("limit")
+    force_regenerate = payload.get("force_regenerate", False)
+
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id is required")
+
+    if not is_embedding_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Embedding generation unavailable - SPOTITEARLY_LLM_API_KEY not configured"
+        )
+
+    if not PGVECTOR_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="pgvector extension not available"
+        )
+
+    # Get publications from this run that need embeddings
+    query = db.query(TriModelEvent).filter(
+        TriModelEvent.run_id == run_id,
+        TriModelEvent.title.isnot(None),
+        TriModelEvent.title != ""
+    )
+
+    if not force_regenerate:
+        # Only get publications without embeddings
+        existing_ids = db.query(PublicationEmbedding.publication_id).filter(
+            PublicationEmbedding.embedding.isnot(None)
+        ).subquery()
+        query = query.filter(~TriModelEvent.publication_id.in_(existing_ids))
+
+    if limit:
+        query = query.limit(limit)
+
+    events = query.all()
+
+    if not events:
+        return {
+            "status": "success",
+            "run_id": run_id,
+            "message": "No publications need embeddings",
+            "processed": 0,
+            "success": 0,
+            "errors": 0
+        }
+
+    # Get OpenAI client
+    client = get_openai_client()
+    if not client:
+        raise HTTPException(
+            status_code=503,
+            detail="Could not initialize OpenAI client"
+        )
+
+    # Process publications
+    success_count = 0
+    error_count = 0
+    now = datetime.utcnow()
+
+    # Build texts for batch embedding
+    items = []
+    for event in events:
+        try:
+            # Try to extract additional info from review JSONs
+            source = None
+            final_summary = None
+            credibility_score = None
+
+            for review_json in [event.claude_review_json, event.gemini_review_json, event.gpt_eval_json]:
+                if review_json:
+                    try:
+                        review = json.loads(review_json) if isinstance(review_json, str) else review_json
+                        if not source and review.get("source"):
+                            source = review.get("source")
+                        if not final_summary and review.get("summary"):
+                            final_summary = review.get("summary")
+                        if not credibility_score and review.get("credibility_score"):
+                            credibility_score = review.get("credibility_score")
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+            text = build_embedding_text(
+                title=event.title,
+                final_summary=final_summary,
+                source=source,
+                evaluator_rationale=event.evaluator_rationale,
+            )
+            items.append({
+                "publication_id": event.publication_id,
+                "title": event.title,
+                "text": text,
+                "source": source,
+                "final_summary": final_summary,
+                "credibility_score": credibility_score,
+                "final_relevancy_score": event.final_relevancy_score,
+            })
+        except ValueError as e:
+            logger.warning(f"Skipping {event.publication_id}: {e}")
+            error_count += 1
+
+    if not items:
+        return {
+            "status": "success",
+            "run_id": run_id,
+            "message": "No valid publications to embed",
+            "processed": len(events),
+            "success": 0,
+            "errors": error_count
+        }
+
+    # Generate embeddings in batch (process in chunks of 50)
+    batch_size = 50
+    for i in range(0, len(items), batch_size):
+        batch = items[i:i + batch_size]
+        texts = [item["text"] for item in batch]
+
+        try:
+            embeddings = generate_embeddings_batch(texts, client)
+
+            for j, item in enumerate(batch):
+                try:
+                    embedding = embeddings[j]
+
+                    # Upsert PublicationEmbedding
+                    existing = db.query(PublicationEmbedding).filter(
+                        PublicationEmbedding.publication_id == item["publication_id"]
+                    ).first()
+
+                    if existing:
+                        existing.title = item["title"]
+                        existing.source = item.get("source")
+                        existing.embedded_text = item["text"]
+                        existing.embedding = embedding
+                        existing.embedding_model = EMBEDDING_MODEL
+                        existing.embedded_at = now
+                        existing.latest_run_id = run_id
+                        existing.final_relevancy_score = item.get("final_relevancy_score")
+                        existing.credibility_score = item.get("credibility_score")
+                        existing.final_summary = item.get("final_summary")
+                        existing.updated_at = now
+                    else:
+                        new_embedding = PublicationEmbedding(
+                            publication_id=item["publication_id"],
+                            title=item["title"],
+                            source=item.get("source"),
+                            embedded_text=item["text"],
+                            embedding=embedding,
+                            embedding_model=EMBEDDING_MODEL,
+                            embedded_at=now,
+                            latest_run_id=run_id,
+                            final_relevancy_score=item.get("final_relevancy_score"),
+                            credibility_score=item.get("credibility_score"),
+                            final_summary=item.get("final_summary"),
+                        )
+                        db.add(new_embedding)
+
+                    success_count += 1
+
+                except Exception as e:
+                    logger.error(f"Error storing embedding for {item['publication_id']}: {e}")
+                    error_count += 1
+
+            db.commit()
+
+        except EmbeddingError as e:
+            logger.error(f"Batch embedding failed: {e}")
+            error_count += len(batch)
+
+    return {
+        "status": "success",
+        "run_id": run_id,
+        "processed": len(events),
+        "success": success_count,
+        "errors": error_count
+    }
+
+
+# GET /search/publications - Semantic search across all publications
+@app.get("/search/publications")
+async def search_publications(
+    q: str = Query(..., min_length=1, max_length=500, description="Search query"),
+    limit: int = Query(default=20, ge=1, le=100, description="Maximum results to return"),
+    min_relevancy: Optional[float] = Query(default=None, ge=0, le=100, description="Minimum relevancy score filter"),
+    min_credibility: Optional[float] = Query(default=None, ge=0, le=100, description="Minimum credibility score filter"),
+    date_from: Optional[str] = Query(default=None, description="Filter publications from date (YYYY-MM-DD)"),
+    date_to: Optional[str] = Query(default=None, description="Filter publications to date (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
+    api_key: Optional[str] = Depends(verify_api_key)
+):
+    """
+    Semantic search across all publications using pgvector similarity.
+
+    Use this endpoint for conceptual queries like "dogs sniffing cancer" to find
+    relevant publications across the entire database history.
+
+    Query Parameters:
+    - q: Search query (required, 1-500 characters)
+    - limit: Maximum results to return (default 20, max 100)
+    - min_relevancy: Filter out results below this relevancy score (0-100)
+    - min_credibility: Filter out results below this credibility score (0-100)
+    - date_from: Only include publications from this date (YYYY-MM-DD)
+    - date_to: Only include publications up to this date (YYYY-MM-DD)
+
+    Returns:
+        Ranked semantic search results with publication details
+    """
+    if not PGVECTOR_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Semantic search unavailable - pgvector extension not installed"
+        )
+
+    if not is_embedding_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Semantic search unavailable - SPOTITEARLY_LLM_API_KEY not configured"
+        )
+
+    # Check if we have any embeddings
+    embedding_count = db.query(PublicationEmbedding).filter(
+        PublicationEmbedding.embedding.isnot(None)
+    ).count()
+
+    if embedding_count == 0:
+        raise HTTPException(
+            status_code=503,
+            detail="No publication embeddings available. Run backfill script first: python scripts/backfill_embeddings.py"
+        )
+
+    # Generate query embedding
+    try:
+        client = get_openai_client()
+        query_embedding = generate_embedding(q, client)
+    except EmbeddingError as e:
+        logger.error(f"Failed to generate query embedding: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to process search query"
+        )
+
+    # Build the search query using pgvector
+    # We use the <-> operator for L2 distance (cosine similarity would be <=>)
+    # Lower distance = more similar
+
+    # Convert embedding to string format for SQL
+    embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
+
+    # Build filters
+    where_clauses = ["embedding IS NOT NULL"]
+    params = {"query_embedding": embedding_str, "limit": limit}
+
+    if min_relevancy is not None:
+        where_clauses.append("final_relevancy_score >= :min_relevancy")
+        params["min_relevancy"] = min_relevancy
+
+    if min_credibility is not None:
+        where_clauses.append("credibility_score >= :min_credibility")
+        params["min_credibility"] = min_credibility
+
+    if date_from:
+        try:
+            datetime.strptime(date_from, "%Y-%m-%d")
+            where_clauses.append("published_date >= :date_from")
+            params["date_from"] = date_from
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date_from format. Use YYYY-MM-DD")
+
+    if date_to:
+        try:
+            datetime.strptime(date_to, "%Y-%m-%d")
+            where_clauses.append("published_date <= :date_to")
+            params["date_to"] = date_to
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date_to format. Use YYYY-MM-DD")
+
+    where_sql = " AND ".join(where_clauses)
+
+    # Execute semantic search query
+    search_query = f"""
+        SELECT
+            publication_id,
+            title,
+            source,
+            published_date,
+            latest_run_id,
+            final_relevancy_score,
+            credibility_score,
+            final_summary,
+            embedding <-> :query_embedding::vector AS distance
+        FROM publication_embeddings
+        WHERE {where_sql}
+        ORDER BY embedding <-> :query_embedding::vector
+        LIMIT :limit
+    """
+
+    try:
+        result = db.execute(text(search_query), params)
+        rows = result.fetchall()
+    except Exception as e:
+        logger.error(f"Search query failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Search failed"
+        )
+
+    # Format results
+    results = []
+    for row in rows:
+        # Convert distance to similarity score (0-1, higher is better)
+        distance = float(row[8]) if row[8] is not None else 0
+        # Approximate similarity: 1 / (1 + distance) or normalize differently
+        similarity = 1 / (1 + distance) if distance >= 0 else 0
+
+        results.append({
+            "publication_id": row[0],
+            "title": row[1],
+            "source": row[2],
+            "published_date": row[3].isoformat() if row[3] else None,
+            "best_run_id": row[4],
+            "final_relevancy_score": row[5],
+            "credibility_score": row[6],
+            "final_summary": row[7][:500] if row[7] else None,  # Limit summary length
+            "similarity": round(similarity, 4),
+        })
+
+    return {
+        "query": q,
+        "count": len(results),
+        "filters": {
+            "min_relevancy": min_relevancy,
+            "min_credibility": min_credibility,
+            "date_from": date_from,
+            "date_to": date_to,
+        },
+        "results": results
+    }
+
+
+# GET /search/status - Check semantic search availability
+@app.get("/search/status")
+async def search_status(
+    db: Session = Depends(get_db),
+    api_key: Optional[str] = Depends(verify_api_key)
+):
+    """
+    Check the status of semantic search functionality.
+
+    Returns information about:
+    - pgvector extension availability
+    - OpenAI API configuration
+    - Number of publications with embeddings
+    """
+    embedding_count = 0
+    total_publications = 0
+
+    try:
+        embedding_count = db.query(PublicationEmbedding).filter(
+            PublicationEmbedding.embedding.isnot(None)
+        ).count()
+        total_publications = db.query(TriModelEvent.publication_id).distinct().count()
+    except Exception as e:
+        logger.warning(f"Could not count embeddings: {e}")
+
+    return {
+        "pgvector_available": PGVECTOR_AVAILABLE,
+        "openai_configured": is_embedding_available(),
+        "embedding_model": EMBEDDING_MODEL if is_embedding_available() else None,
+        "publications_with_embeddings": embedding_count,
+        "total_unique_publications": total_publications,
+        "coverage_percent": round(100 * embedding_count / total_publications, 1) if total_publications > 0 else 0,
+        "search_available": PGVECTOR_AVAILABLE and is_embedding_available() and embedding_count > 0,
     }
 
 

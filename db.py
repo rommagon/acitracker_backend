@@ -1,6 +1,7 @@
 """
 Database configuration and models for AciTrack Backend.
 Uses SQLAlchemy 2.0 with sync driver (psycopg2) for Render Postgres.
+Includes pgvector extension for semantic search embeddings.
 """
 
 import os
@@ -21,6 +22,14 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from sqlalchemy.pool import NullPool
+
+# Try to import pgvector support
+try:
+    from pgvector.sqlalchemy import Vector
+    PGVECTOR_AVAILABLE = True
+except ImportError:
+    PGVECTOR_AVAILABLE = False
+    Vector = None
 
 # Read DATABASE_URL from environment
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -141,6 +150,49 @@ class MustRead(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
+# Embedding dimension for text-embedding-3-small
+EMBEDDING_DIMENSION = 1536
+
+
+class PublicationEmbedding(Base):
+    """
+    Stores embeddings for publications to enable semantic search.
+    One embedding per unique publication_id across all runs.
+    Uses pgvector for efficient similarity search.
+    """
+    __tablename__ = "publication_embeddings"
+
+    publication_id = Column(String, primary_key=True, index=True)
+
+    # Publication metadata (denormalized for search results)
+    title = Column(Text, nullable=True)
+    source = Column(String, nullable=True)
+    published_date = Column(DateTime, nullable=True)
+
+    # Text that was embedded (for debugging/auditing)
+    embedded_text = Column(Text, nullable=True)
+
+    # Embedding vector (1536 dimensions for text-embedding-3-small)
+    # Note: Vector column created conditionally if pgvector available
+    embedding = Column(
+        Vector(EMBEDDING_DIMENSION) if PGVECTOR_AVAILABLE else Text,
+        nullable=True
+    )
+
+    # Embedding metadata
+    embedding_model = Column(String, nullable=True, default="text-embedding-3-small")
+    embedded_at = Column(DateTime, nullable=True)
+
+    # Cached scores from most recent run (for filtering)
+    latest_run_id = Column(String, nullable=True)
+    final_relevancy_score = Column(Float, nullable=True)
+    credibility_score = Column(Float, nullable=True)
+    final_summary = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
 def get_db() -> Session:
     """
     Dependency function to get a database session.
@@ -153,13 +205,33 @@ def get_db() -> Session:
         db.close()
 
 
+def ensure_pgvector_extension():
+    """
+    Ensure pgvector extension is enabled in the database.
+    Safe to call multiple times (uses IF NOT EXISTS).
+    """
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            conn.commit()
+        return True
+    except Exception as e:
+        print(f"Warning: Could not enable pgvector extension: {e}")
+        print("Semantic search will not be available.")
+        return False
+
+
 def init_db():
     """
-    Initialize database tables.
-    Creates all tables defined in Base metadata.
+    Initialize database tables and extensions.
+    Creates pgvector extension and all tables defined in Base metadata.
 
     Note: For production, use Alembic migrations instead.
     """
+    # First, ensure pgvector extension exists
+    ensure_pgvector_extension()
+
+    # Then create all tables
     Base.metadata.create_all(bind=engine)
 
 

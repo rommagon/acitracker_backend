@@ -2,8 +2,8 @@
   "openapi": "3.0.1",
   "info": {
     "title": "AciTrack API",
-    "description": "Postgres-backed API for accessing academic publication tracking data from the AciTrack system",
-    "version": "2.0.0"
+    "description": "Postgres-backed API for accessing academic publication tracking data from the AciTrack system. Includes semantic search powered by pgvector for conceptual queries across all historical publications. Use /search/publications for database-wide conceptual queries like 'dogs sniffing cancer' or 'liquid biopsy early detection'.",
+    "version": "2.1.0"
   },
   "servers": [
     {
@@ -41,6 +41,133 @@
                       "format": "date-time"
                     }
                   }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/search/publications": {
+      "get": {
+        "operationId": "searchPublications",
+        "summary": "Semantic search across all publications",
+        "description": "Use this endpoint for conceptual, database-wide queries. Searches across ALL historical publications using AI-powered semantic similarity (pgvector). Examples: 'dogs sniffing cancer', 'liquid biopsy early detection', 'machine learning diagnostic imaging'. Returns ranked results by semantic relevance with optional score and date filters.",
+        "security": [{"ApiKeyAuth": []}],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Search query - natural language description of what you're looking for",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum results to return",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "min_relevancy",
+            "in": "query",
+            "description": "Filter out results below this relevancy score (0-100)",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "min_credibility",
+            "in": "query",
+            "description": "Filter out results below this credibility score (0-100)",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "date_from",
+            "in": "query",
+            "description": "Only include publications from this date (YYYY-MM-DD)",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "date_to",
+            "in": "query",
+            "description": "Only include publications up to this date (YYYY-MM-DD)",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Semantic search results ranked by relevance",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResults"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Semantic search unavailable (embeddings not configured or backfill needed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/search/status": {
+      "get": {
+        "operationId": "searchStatus",
+        "summary": "Check semantic search availability",
+        "description": "Returns information about semantic search functionality including pgvector status, API configuration, and embedding coverage",
+        "security": [{"ApiKeyAuth": []}],
+        "responses": {
+          "200": {
+            "description": "Search system status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchStatus"
                 }
               }
             }
@@ -351,6 +478,118 @@
       }
     },
     "schemas": {
+      "SearchResults": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "The search query that was executed"
+          },
+          "count": {
+            "type": "integer",
+            "description": "Number of results returned"
+          },
+          "filters": {
+            "type": "object",
+            "description": "Applied filters",
+            "properties": {
+              "min_relevancy": {
+                "type": "number"
+              },
+              "min_credibility": {
+                "type": "number"
+              },
+              "date_from": {
+                "type": "string"
+              },
+              "date_to": {
+                "type": "string"
+              }
+            }
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SearchResult"
+            }
+          }
+        }
+      },
+      "SearchResult": {
+        "type": "object",
+        "properties": {
+          "publication_id": {
+            "type": "string",
+            "description": "Unique publication identifier"
+          },
+          "title": {
+            "type": "string",
+            "description": "Publication title"
+          },
+          "source": {
+            "type": "string",
+            "description": "Publication source/journal"
+          },
+          "published_date": {
+            "type": "string",
+            "format": "date",
+            "description": "Publication date"
+          },
+          "best_run_id": {
+            "type": "string",
+            "description": "Most recent run_id where this publication was evaluated"
+          },
+          "final_relevancy_score": {
+            "type": "number",
+            "description": "Final relevancy score from tri-model evaluation (0-100)"
+          },
+          "credibility_score": {
+            "type": "number",
+            "description": "Credibility score (0-100)"
+          },
+          "final_summary": {
+            "type": "string",
+            "description": "Brief summary of the publication (max 500 chars)"
+          },
+          "similarity": {
+            "type": "number",
+            "description": "Semantic similarity score (0-1, higher is more relevant)"
+          }
+        }
+      },
+      "SearchStatus": {
+        "type": "object",
+        "properties": {
+          "pgvector_available": {
+            "type": "boolean",
+            "description": "Whether pgvector extension is installed"
+          },
+          "openai_configured": {
+            "type": "boolean",
+            "description": "Whether OpenAI API key is configured"
+          },
+          "embedding_model": {
+            "type": "string",
+            "description": "Embedding model being used"
+          },
+          "publications_with_embeddings": {
+            "type": "integer",
+            "description": "Number of publications that have embeddings"
+          },
+          "total_unique_publications": {
+            "type": "integer",
+            "description": "Total unique publications in database"
+          },
+          "coverage_percent": {
+            "type": "number",
+            "description": "Percentage of publications with embeddings"
+          },
+          "search_available": {
+            "type": "boolean",
+            "description": "Whether semantic search is fully operational"
+          }
+        }
+      },
       "Run": {
         "type": "object",
         "properties": {

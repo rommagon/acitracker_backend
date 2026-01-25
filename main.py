@@ -681,41 +681,31 @@ async def ingest_tri_model_events(
             inserted += 1
 
         # Upsert canonical publication record
-        # Extract metadata from review JSONs
-        source = None
-        published_date = None
-        url = None
-        credibility_score = None
+        # Use direct fields from event payload if provided (not from review JSONs)
+        title = event_data.get("title")
+        source = event_data.get("source")  # Direct field, not from review JSON
+        url = event_data.get("url")  # Direct field, not from review JSON
+        relevancy_score = event_data.get("final_relevancy_score")
 
-        for review in [event_data.get("claude_review"), event_data.get("gemini_review"), event_data.get("gpt_eval")]:
-            if review and isinstance(review, dict):
-                if not source and review.get("source"):
-                    source = str(review["source"])[:255]
-                if not published_date and review.get("published_date"):
-                    try:
-                        pub_date_str = review["published_date"]
-                        if isinstance(pub_date_str, str):
-                            published_date = datetime.fromisoformat(pub_date_str.replace("Z", "+00:00"))
-                    except (ValueError, TypeError):
-                        pass
-                if not url and review.get("url"):
-                    url = str(review["url"])
-                if credibility_score is None and review.get("credibility_score") is not None:
-                    try:
-                        credibility_score = float(review["credibility_score"])
-                    except (ValueError, TypeError):
-                        pass
+        # Parse published_date if provided directly in event
+        published_date = None
+        if event_data.get("published_date"):
+            try:
+                pub_date_str = event_data["published_date"]
+                if isinstance(pub_date_str, str):
+                    published_date = datetime.fromisoformat(pub_date_str.replace("Z", "+00:00"))
+                elif isinstance(pub_date_str, datetime):
+                    published_date = pub_date_str
+            except (ValueError, TypeError):
+                pass
 
         # Upsert publication
         existing_pub = db.query(Publication).filter(
             Publication.publication_id == publication_id
         ).first()
 
-        title = event_data.get("title")
-        relevancy_score = event_data.get("final_relevancy_score")
-
         if existing_pub:
-            # Update with latest info
+            # Update with latest info (only update non-null fields)
             if title:
                 existing_pub.title = title
             if source:
@@ -727,11 +717,9 @@ async def ingest_tri_model_events(
             existing_pub.latest_run_id = run_id
             if relevancy_score is not None:
                 existing_pub.latest_relevancy_score = relevancy_score
-            if credibility_score is not None:
-                existing_pub.latest_credibility_score = credibility_score
             existing_pub.updated_at = now
         else:
-            # Insert new publication
+            # Insert new publication (requires title)
             if title:
                 new_pub = Publication(
                     publication_id=publication_id,
@@ -741,7 +729,6 @@ async def ingest_tri_model_events(
                     url=url,
                     latest_run_id=run_id,
                     latest_relevancy_score=relevancy_score,
-                    latest_credibility_score=credibility_score,
                 )
                 db.add(new_pub)
 
@@ -907,38 +894,21 @@ async def ingest_embeddings(
     now = datetime.utcnow()
 
     # Build texts for batch embedding
+    # Get metadata from canonical publications table (not from review JSONs)
     items = []
     for event in events:
         try:
-            # Try to extract additional info from review JSONs
-            source = None
-            final_summary = None
-            credibility_score = None
-            published_date = None
+            # Look up canonical publication for metadata
+            pub = db.query(Publication).filter(
+                Publication.publication_id == event.publication_id
+            ).first()
 
-            for review_json in [event.claude_review_json, event.gemini_review_json, event.gpt_eval_json]:
-                if review_json:
-                    try:
-                        review = json.loads(review_json) if isinstance(review_json, str) else review_json
-                        if not source and review.get("source"):
-                            source = review.get("source")
-                        if not final_summary and review.get("summary"):
-                            final_summary = review.get("summary")
-                        if not credibility_score and review.get("credibility_score"):
-                            credibility_score = review.get("credibility_score")
-                        if not published_date and review.get("published_date"):
-                            pub_date_str = review.get("published_date")
-                            if isinstance(pub_date_str, str):
-                                try:
-                                    published_date = datetime.fromisoformat(pub_date_str.replace("Z", "+00:00"))
-                                except (ValueError, TypeError):
-                                    pass
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+            # Use metadata from publications table if available
+            source = pub.source if pub else None
+            published_date = pub.published_date if pub else None
 
             text = build_embedding_text(
                 title=event.title,
-                final_summary=final_summary,
                 source=source,
                 evaluator_rationale=event.evaluator_rationale,
             )
@@ -948,8 +918,6 @@ async def ingest_embeddings(
                 "text": text,
                 "source": source,
                 "published_date": published_date,
-                "final_summary": final_summary,
-                "credibility_score": credibility_score,
                 "final_relevancy_score": event.final_relevancy_score,
             })
         except ValueError as e:
@@ -994,8 +962,6 @@ async def ingest_embeddings(
                         existing.embedded_at = now
                         existing.latest_run_id = run_id
                         existing.final_relevancy_score = item.get("final_relevancy_score")
-                        existing.credibility_score = item.get("credibility_score")
-                        existing.final_summary = item.get("final_summary")
                         existing.updated_at = now
                     else:
                         new_embedding = PublicationEmbedding(
@@ -1009,8 +975,6 @@ async def ingest_embeddings(
                             embedded_at=now,
                             latest_run_id=run_id,
                             final_relevancy_score=item.get("final_relevancy_score"),
-                            credibility_score=item.get("credibility_score"),
-                            final_summary=item.get("final_summary"),
                         )
                         db.add(new_embedding)
 

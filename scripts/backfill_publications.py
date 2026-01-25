@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Backfill the canonical publications table from tri_model_events.
+Backfill the canonical publications table from existing data.
 
 This script:
-- Extracts unique publications from tri_model_events
-- Populates the publications table with metadata (title, source, published_date)
-- Extracts metadata from review JSONs when available
-- Updates latest_run_id and scores
+- Populates publications table from publication_embeddings (which has metadata)
+- Falls back to tri_model_events for title when not in embeddings
+- Uses COALESCE logic to get best available data
+- Is resumable and safe to rerun
 
 Usage:
     python scripts/backfill_publications.py [OPTIONS]
@@ -21,7 +21,6 @@ Environment Variables:
 """
 
 import argparse
-import json
 import logging
 import os
 import sys
@@ -34,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from db import SessionLocal, Publication, TriModelEvent, init_db
+from db import SessionLocal, Publication, init_db
 
 # Configure logging
 logging.basicConfig(
@@ -45,63 +44,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def extract_metadata_from_review_json(review_json: Optional[str]) -> Dict[str, Any]:
-    """
-    Extract source, published_date, url, and credibility_score from a review JSON.
-
-    Returns dict with extracted values (may contain None values).
-    """
-    result = {
-        "source": None,
-        "published_date": None,
-        "url": None,
-        "credibility_score": None,
-    }
-
-    if not review_json:
-        return result
-
-    try:
-        review = json.loads(review_json) if isinstance(review_json, str) else review_json
-
-        if review.get("source"):
-            result["source"] = str(review["source"])[:255]  # Limit length
-
-        if review.get("published_date"):
-            pub_date_str = review["published_date"]
-            if isinstance(pub_date_str, str):
-                try:
-                    result["published_date"] = datetime.fromisoformat(
-                        pub_date_str.replace("Z", "+00:00")
-                    )
-                except (ValueError, TypeError):
-                    pass
-
-        if review.get("url"):
-            result["url"] = str(review["url"])
-
-        if review.get("credibility_score") is not None:
-            try:
-                result["credibility_score"] = float(review["credibility_score"])
-            except (ValueError, TypeError):
-                pass
-
-    except (json.JSONDecodeError, TypeError, AttributeError):
-        pass
-
-    return result
-
-
 def get_publications_to_backfill(
     db: Session,
     limit: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Get unique publications from tri_model_events that need to be in publications table.
+    Get unique publications that need to be in publications table.
+
+    Sources metadata from:
+    - publication_embeddings: title, source, published_date (best source)
+    - tri_model_events: title (fallback), final_relevancy_score, run_id
 
     Returns list of publication dicts with all available metadata.
     """
-    # Get the latest event for each publication_id with all metadata
+    # Get unique publications with metadata from embeddings and events
+    # COALESCE to prefer embeddings data over events data
     query = """
         WITH latest_events AS (
             SELECT DISTINCT ON (publication_id)
@@ -109,26 +66,26 @@ def get_publications_to_backfill(
                 title,
                 run_id,
                 final_relevancy_score,
-                claude_review_json,
-                gemini_review_json,
-                gpt_eval_json,
                 created_at
             FROM tri_model_events
-            WHERE publication_id IS NOT NULL AND title IS NOT NULL AND title != ''
+            WHERE publication_id IS NOT NULL
             ORDER BY publication_id, created_at DESC
         )
         SELECT
-            le.publication_id,
-            le.title,
-            le.run_id,
-            le.final_relevancy_score,
-            le.claude_review_json,
-            le.gemini_review_json,
-            le.gpt_eval_json
+            COALESCE(pe.publication_id, le.publication_id) AS publication_id,
+            COALESCE(pe.title, le.title) AS title,
+            pe.source,
+            pe.published_date,
+            COALESCE(pe.latest_run_id, le.run_id) AS latest_run_id,
+            COALESCE(pe.final_relevancy_score, le.final_relevancy_score) AS latest_relevancy_score,
+            pe.credibility_score AS latest_credibility_score
         FROM latest_events le
-        LEFT JOIN publications p ON p.publication_id = le.publication_id
+        FULL OUTER JOIN publication_embeddings pe ON pe.publication_id = le.publication_id
+        LEFT JOIN publications p ON p.publication_id = COALESCE(pe.publication_id, le.publication_id)
         WHERE p.publication_id IS NULL
-        ORDER BY le.created_at DESC
+          AND COALESCE(pe.title, le.title) IS NOT NULL
+          AND COALESCE(pe.title, le.title) != ''
+        ORDER BY le.created_at DESC NULLS LAST
     """
 
     params = {}
@@ -144,30 +101,13 @@ def get_publications_to_backfill(
         pub = {
             "publication_id": row[0],
             "title": row[1],
-            "run_id": row[2],
-            "final_relevancy_score": row[3],
-            "claude_review_json": row[4],
-            "gemini_review_json": row[5],
-            "gpt_eval_json": row[6],
-            "source": None,
-            "published_date": None,
-            "url": None,
-            "credibility_score": None,
+            "source": row[2],
+            "published_date": row[3],
+            "latest_run_id": row[4],
+            "latest_relevancy_score": row[5],
+            "latest_credibility_score": row[6],
+            "url": None,  # No canonical URL source available
         }
-
-        # Extract metadata from review JSONs (try each until we get values)
-        for review_json in [pub["claude_review_json"], pub["gemini_review_json"], pub["gpt_eval_json"]]:
-            metadata = extract_metadata_from_review_json(review_json)
-
-            if not pub["source"] and metadata["source"]:
-                pub["source"] = metadata["source"]
-            if not pub["published_date"] and metadata["published_date"]:
-                pub["published_date"] = metadata["published_date"]
-            if not pub["url"] and metadata["url"]:
-                pub["url"] = metadata["url"]
-            if pub["credibility_score"] is None and metadata["credibility_score"] is not None:
-                pub["credibility_score"] = metadata["credibility_score"]
-
         publications.append(pub)
 
     return publications
@@ -204,17 +144,20 @@ def backfill_publications(
 
             if existing:
                 # Update existing
-                existing.title = pub["title"]
+                if pub["title"]:
+                    existing.title = pub["title"]
                 if pub["source"]:
                     existing.source = pub["source"]
                 if pub["published_date"]:
                     existing.published_date = pub["published_date"]
                 if pub["url"]:
                     existing.url = pub["url"]
-                existing.latest_run_id = pub["run_id"]
-                existing.latest_relevancy_score = pub["final_relevancy_score"]
-                if pub["credibility_score"] is not None:
-                    existing.latest_credibility_score = pub["credibility_score"]
+                if pub["latest_run_id"]:
+                    existing.latest_run_id = pub["latest_run_id"]
+                if pub["latest_relevancy_score"] is not None:
+                    existing.latest_relevancy_score = pub["latest_relevancy_score"]
+                if pub["latest_credibility_score"] is not None:
+                    existing.latest_credibility_score = pub["latest_credibility_score"]
                 existing.updated_at = now
             else:
                 # Insert new
@@ -224,9 +167,9 @@ def backfill_publications(
                     source=pub["source"],
                     published_date=pub["published_date"],
                     url=pub["url"],
-                    latest_run_id=pub["run_id"],
-                    latest_relevancy_score=pub["final_relevancy_score"],
-                    latest_credibility_score=pub["credibility_score"],
+                    latest_run_id=pub["latest_run_id"],
+                    latest_relevancy_score=pub["latest_relevancy_score"],
+                    latest_credibility_score=pub["latest_credibility_score"],
                 )
                 db.add(new_pub)
 
@@ -242,9 +185,41 @@ def backfill_publications(
     return success_count, error_count
 
 
+def report_coverage(db: Session):
+    """Report metadata coverage in the publications table."""
+    query = """
+        SELECT
+            COUNT(*) AS total,
+            COUNT(source) AS with_source,
+            COUNT(published_date) AS with_date,
+            COUNT(url) AS with_url,
+            COUNT(latest_run_id) AS with_run_id
+        FROM publications
+    """
+    result = db.execute(text(query))
+    row = result.fetchone()
+
+    total = row[0] or 0
+    with_source = row[1] or 0
+    with_date = row[2] or 0
+    with_url = row[3] or 0
+    with_run_id = row[4] or 0
+
+    logger.info("=" * 50)
+    logger.info("PUBLICATIONS TABLE COVERAGE")
+    logger.info(f"  Total publications: {total}")
+    if total > 0:
+        logger.info(f"  With source: {with_source} ({100*with_source/total:.1f}%)")
+        logger.info(f"  With date: {with_date} ({100*with_date/total:.1f}%)")
+        logger.info(f"  With URL: {with_url} ({100*with_url/total:.1f}%)")
+        logger.info(f"  With run_id: {with_run_id} ({100*with_run_id/total:.1f}%)")
+    else:
+        logger.info("  (no publications)")
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Backfill canonical publications table from tri_model_events"
+        description="Backfill canonical publications table from existing data"
     )
     parser.add_argument(
         "--limit",
@@ -287,12 +262,14 @@ def main():
 
         if total == 0:
             logger.info("No publications need backfilling - all up to date!")
+            report_coverage(db)
             return
 
-        # Preview some metadata
+        # Preview metadata availability in this batch
         with_source = sum(1 for p in publications if p["source"])
         with_date = sum(1 for p in publications if p["published_date"])
         with_url = sum(1 for p in publications if p["url"])
+        logger.info(f"In this batch:")
         logger.info(f"  With source: {with_source}/{total} ({100*with_source/total:.1f}%)")
         logger.info(f"  With date: {with_date}/{total} ({100*with_date/total:.1f}%)")
         logger.info(f"  With URL: {with_url}/{total} ({100*with_url/total:.1f}%)")
@@ -312,6 +289,9 @@ def main():
 
         if args.dry_run:
             logger.info("  (DRY RUN - no changes made)")
+        else:
+            # Report final coverage
+            report_coverage(db)
 
     except Exception as e:
         logger.error(f"Backfill failed: {e}")

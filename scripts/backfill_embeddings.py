@@ -25,7 +25,6 @@ Environment Variables:
 """
 
 import argparse
-import json
 import logging
 import os
 import sys
@@ -39,7 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from db import SessionLocal, TriModelEvent, PublicationEmbedding, init_db, engine
+from db import SessionLocal, PublicationEmbedding, init_db
 from embeddings import (
     get_openai_client,
     build_embedding_text,
@@ -68,7 +67,7 @@ def get_publications_needing_embeddings(
     Get publications that need embeddings generated.
 
     Returns publications from tri_model_events that don't have embeddings
-    in publication_embeddings table.
+    in publication_embeddings table. Gets metadata from canonical publications table.
 
     Args:
         db: Database session
@@ -79,7 +78,7 @@ def get_publications_needing_embeddings(
         List of publication dictionaries with required fields
     """
     # Build query to find unique publications without embeddings
-    # We get the latest event for each publication_id
+    # Get metadata from canonical publications table (not from review JSONs)
     query = """
         WITH latest_events AS (
             SELECT DISTINCT ON (publication_id)
@@ -88,25 +87,22 @@ def get_publications_needing_embeddings(
                 run_id,
                 evaluator_rationale,
                 final_relevancy_score,
-                created_at,
-                claude_review_json,
-                gemini_review_json,
-                gpt_eval_json
+                created_at
             FROM tri_model_events
             WHERE title IS NOT NULL AND title != ''
             ORDER BY publication_id, created_at DESC
         )
         SELECT
             le.publication_id,
-            le.title,
-            le.run_id,
+            COALESCE(p.title, le.title) AS title,
+            COALESCE(p.latest_run_id, le.run_id) AS run_id,
             le.evaluator_rationale,
-            le.final_relevancy_score,
+            COALESCE(p.latest_relevancy_score, le.final_relevancy_score) AS final_relevancy_score,
             le.created_at,
-            le.claude_review_json,
-            le.gemini_review_json,
-            le.gpt_eval_json
+            p.source,
+            p.published_date
         FROM latest_events le
+        LEFT JOIN publications p ON p.publication_id = le.publication_id
         LEFT JOIN publication_embeddings pe ON le.publication_id = pe.publication_id
         WHERE pe.publication_id IS NULL
     """
@@ -135,32 +131,9 @@ def get_publications_needing_embeddings(
             "evaluator_rationale": row[3],
             "final_relevancy_score": row[4],
             "created_at": row[5],
-            "claude_review_json": row[6],
-            "gemini_review_json": row[7],
-            "gpt_eval_json": row[8],
+            "source": row[6],  # From publications table
+            "published_date": row[7],  # From publications table
         }
-
-        # Try to extract source, summary, published_date from review JSONs
-        pub["source"] = None
-        pub["final_summary"] = None
-        pub["credibility_score"] = None
-        pub["published_date"] = None
-
-        for review_json in [pub["claude_review_json"], pub["gemini_review_json"], pub["gpt_eval_json"]]:
-            if review_json:
-                try:
-                    review = json.loads(review_json) if isinstance(review_json, str) else review_json
-                    if not pub["source"] and review.get("source"):
-                        pub["source"] = review.get("source")
-                    if not pub["final_summary"] and review.get("summary"):
-                        pub["final_summary"] = review.get("summary")
-                    if not pub["credibility_score"] and review.get("credibility_score"):
-                        pub["credibility_score"] = review.get("credibility_score")
-                    if not pub["published_date"] and review.get("published_date"):
-                        pub["published_date"] = review.get("published_date")
-                except (json.JSONDecodeError, TypeError):
-                    pass
-
         publications.append(pub)
 
     return publications
@@ -177,7 +150,7 @@ def process_batch(
 
     Args:
         db: Database session
-        publications: List of publication dictionaries
+        publications: List of publication dictionaries (with metadata from publications table)
         client: OpenAI client
         dry_run: If True, don't actually store anything
 
@@ -193,7 +166,6 @@ def process_batch(
         try:
             text = build_embedding_text(
                 title=pub["title"],
-                final_summary=pub.get("final_summary"),
                 source=pub.get("source"),
                 evaluator_rationale=pub.get("evaluator_rationale"),
             )
@@ -228,13 +200,8 @@ def process_batch(
                     PublicationEmbedding.publication_id == pub_id
                 ).first()
 
-                # Parse published_date if it's a string
+                # published_date comes from publications table (already datetime or None)
                 published_date = pub.get("published_date")
-                if published_date and isinstance(published_date, str):
-                    try:
-                        published_date = datetime.fromisoformat(published_date.replace("Z", "+00:00"))
-                    except (ValueError, TypeError):
-                        published_date = None
 
                 if existing:
                     existing.title = pub["title"]
@@ -246,8 +213,6 @@ def process_batch(
                     existing.embedded_at = now
                     existing.latest_run_id = pub.get("run_id")
                     existing.final_relevancy_score = pub.get("final_relevancy_score")
-                    existing.credibility_score = pub.get("credibility_score")
-                    existing.final_summary = pub.get("final_summary")
                     existing.updated_at = now
                 else:
                     new_embedding = PublicationEmbedding(
@@ -261,8 +226,6 @@ def process_batch(
                         embedded_at=now,
                         latest_run_id=pub.get("run_id"),
                         final_relevancy_score=pub.get("final_relevancy_score"),
-                        credibility_score=pub.get("credibility_score"),
-                        final_summary=pub.get("final_summary"),
                     )
                     db.add(new_embedding)
 

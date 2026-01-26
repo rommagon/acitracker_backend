@@ -707,8 +707,8 @@ CALIBRATION_UI_HTML = '''
             box-shadow: var(--shadow);
         }
         .logo {
-            width: 120px;
-            height: 40px;
+            width: 140px;
+            height: 48px;
             border-radius: var(--radius-sm);
             object-fit: contain;
         }
@@ -1088,7 +1088,7 @@ CALIBRATION_UI_HTML = '''
 </head>
 <body>
     <div class="header">
-        <img src="/static/spot_it_early_logo.svg" alt="Spot It Early Logo" class="logo" onerror="this.style.display='none'">
+        <img src="/static/spotitearly_logo.jpeg?v=2" alt="Spot It Early" class="logo" onerror="this.style.display='none'">
         <div class="header-text">
             <h1>Science Agent Calibration</h1>
             <p class="subtitle">Help calibrate AI relevancy scoring by rating publications</p>

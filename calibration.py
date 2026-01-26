@@ -707,8 +707,8 @@ CALIBRATION_UI_HTML = '''
             box-shadow: var(--shadow);
         }
         .logo {
-            width: 140px;
-            height: 48px;
+            width: 180px;
+            height: 60px;
             border-radius: var(--radius-sm);
             object-fit: contain;
         }

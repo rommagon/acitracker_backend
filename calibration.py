@@ -38,6 +38,43 @@ ACITRACK_API_KEY = os.getenv("ACITRACK_API_KEY")
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
+
+def extract_summary(*json_texts: str | None) -> str | None:
+    """
+    Extract a summary from one or more JSON strings.
+    Searches for summary-like keys at top level and one level deep.
+    Returns the first non-empty string found.
+    """
+    summary_keys = ["final_summary", "summary", "short_summary", "one_sentence_summary", "lay_summary"]
+    nested_keys = ["result", "analysis", "output", "data", "response"]
+
+    for txt in json_texts:
+        if not txt:
+            continue
+        try:
+            obj = json.loads(txt)
+        except Exception:
+            continue
+
+        if not isinstance(obj, dict):
+            continue
+
+        # First, check top-level keys
+        for k in summary_keys:
+            v = obj.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+
+        # Then check one level deep in common nested structures
+        for nested_key in nested_keys:
+            nested = obj.get(nested_key)
+            if isinstance(nested, dict):
+                for k in summary_keys:
+                    v = nested.get(k)
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+
+    return None
 async def verify_api_key(api_key: Optional[str] = Security(api_key_header)):
     """Verify API key for protected endpoints."""
     if not ACITRACK_API_KEY:
@@ -121,6 +158,15 @@ def fetch_publication_details(
         details["run_id"] = event.run_id
         details["mode"] = event.mode
 
+        # Extract summary from TriModelEvent JSON fields
+        summary = extract_summary(
+            event.gpt_eval_json,
+            event.claude_review_json,
+            event.gemini_review_json
+        )
+        if summary:
+            details["final_summary"] = summary
+
     # Try publications table for source/date
     pub = db.query(Publication).filter(
         Publication.publication_id == publication_id
@@ -136,13 +182,15 @@ def fetch_publication_details(
         if not details["run_id"]:
             details["run_id"] = pub.latest_run_id
 
-    # Try publication_embeddings for summary
+    # Try publication_embeddings for summary (fallback) and other fields
     emb = db.query(PublicationEmbedding).filter(
         PublicationEmbedding.publication_id == publication_id
     ).first()
 
     if emb:
-        details["final_summary"] = emb.final_summary
+        # Only use embedding summary if we don't have one yet
+        if not details["final_summary"] and emb.final_summary:
+            details["final_summary"] = emb.final_summary
         if not details["source"]:
             details["source"] = emb.source
         if not details["published_date"]:
@@ -642,6 +690,65 @@ async def list_items(
     }
 
 
+@router.post("/items/backfill-summaries")
+async def backfill_summaries(
+    limit: int = Query(default=500, ge=1, le=5000),
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    Backfill missing summaries for existing calibration items.
+    Extracts summaries from TriModelEvent JSON fields.
+    """
+    # Find items with missing summaries
+    items_to_update = db.query(CalibrationItem).filter(
+        or_(
+            CalibrationItem.final_summary.is_(None),
+            CalibrationItem.final_summary == ""
+        )
+    ).limit(limit).all()
+
+    updated = 0
+    still_missing = 0
+
+    for item in items_to_update:
+        # Try to fetch summary from TriModelEvent
+        event = db.query(TriModelEvent).filter(
+            TriModelEvent.publication_id == item.publication_id
+        ).order_by(desc(TriModelEvent.created_at)).first()
+
+        summary = None
+        if event:
+            summary = extract_summary(
+                event.gpt_eval_json,
+                event.claude_review_json,
+                event.gemini_review_json
+            )
+
+        # Fallback to publication_embeddings
+        if not summary:
+            emb = db.query(PublicationEmbedding).filter(
+                PublicationEmbedding.publication_id == item.publication_id
+            ).first()
+            if emb and emb.final_summary:
+                summary = emb.final_summary
+
+        if summary:
+            item.final_summary = summary
+            item.updated_at = datetime.utcnow()
+            updated += 1
+        else:
+            still_missing += 1
+
+    db.commit()
+
+    return {
+        "updated": updated,
+        "still_missing": still_missing,
+        "processed": len(items_to_update)
+    }
+
+
 # ----- HTML UI -----
 
 CALIBRATION_UI_HTML = '''
@@ -840,6 +947,19 @@ CALIBRATION_UI_HTML = '''
             background: var(--gray-50);
             padding: 16px;
             border-radius: var(--radius-sm);
+        }
+        .summary-text.no-summary {
+            color: var(--gray-500);
+            font-style: italic;
+            background: var(--highlight-light);
+            border: 1px dashed var(--highlight);
+        }
+        .paper-meta a {
+            color: var(--primary);
+            text-decoration: none;
+        }
+        .paper-meta a:hover {
+            text-decoration: underline;
         }
         .slider-container {
             display: flex;
@@ -1127,6 +1247,7 @@ CALIBRATION_UI_HTML = '''
             <div class="paper-meta">
                 <span id="paper-source"></span>
                 <span id="paper-date"></span>
+                <span id="paper-link"></span>
             </div>
             <hr class="divider">
             <div class="summary-section">
@@ -1298,7 +1419,26 @@ CALIBRATION_UI_HTML = '''
             document.getElementById('paper-title').textContent = item.title || 'Untitled';
             document.getElementById('paper-source').textContent = item.source ? `📚 ${item.source}` : '';
             document.getElementById('paper-date').textContent = item.published_date ? `📅 ${item.published_date.split('T')[0]}` : '';
-            document.getElementById('paper-summary').textContent = item.final_summary || 'No summary available.';
+
+            // Show publication link if available (e.g., PubMed ID)
+            const linkEl = document.getElementById('paper-link');
+            if (item.publication_id && item.publication_id.match(/^\\d+$/)) {
+                linkEl.innerHTML = `🔗 <a href="https://pubmed.ncbi.nlm.nih.gov/${item.publication_id}/" target="_blank" rel="noopener">View on PubMed</a>`;
+            } else if (item.publication_id) {
+                linkEl.textContent = `🆔 ${item.publication_id}`;
+            } else {
+                linkEl.textContent = '';
+            }
+
+            // Show summary or fallback message
+            const summaryEl = document.getElementById('paper-summary');
+            if (item.final_summary && item.final_summary.trim()) {
+                summaryEl.textContent = item.final_summary;
+                summaryEl.classList.remove('no-summary');
+            } else {
+                summaryEl.textContent = 'No summary available for this item. Please rate based on the title, source, and publication link above.';
+                summaryEl.classList.add('no-summary');
+            }
 
             // Reset form
             document.getElementById('score-slider').value = 50;

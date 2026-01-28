@@ -1560,6 +1560,86 @@ CALIBRATION_UI_HTML = '''
 '''
 
 
+@router.delete("/items/{item_id}")
+async def delete_calibration_item(
+    item_id: str,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    Delete a calibration item and its associated human evaluations.
+    """
+    try:
+        item_uuid = UUID(item_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid item ID format")
+
+    # Check item exists
+    item = db.query(CalibrationItem).filter(
+        CalibrationItem.id == item_uuid
+    ).first()
+
+    if not item:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Calibration item not found: {item_id}"
+        )
+
+    # Delete associated human evaluations first
+    deleted_evals = db.query(HumanEvaluation).filter(
+        HumanEvaluation.calibration_item_id == item_uuid
+    ).delete()
+
+    # Delete the calibration item
+    db.delete(item)
+    db.commit()
+
+    return {
+        "status": "deleted",
+        "item_id": item_id,
+        "deleted_evaluations": deleted_evals
+    }
+
+
+@router.delete("/items/bulk/delete")
+async def bulk_delete_calibration_items(
+    item_ids: List[str],
+    db: Session = Depends(get_db),
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    Bulk delete calibration items and their associated human evaluations.
+    """
+    deleted = 0
+    failed = []
+
+    for item_id in item_ids:
+        try:
+            item_uuid = UUID(item_id)
+            item = db.query(CalibrationItem).filter(
+                CalibrationItem.id == item_uuid
+            ).first()
+
+            if item:
+                # Delete associated evaluations
+                db.query(HumanEvaluation).filter(
+                    HumanEvaluation.calibration_item_id == item_uuid
+                ).delete()
+                db.delete(item)
+                deleted += 1
+            else:
+                failed.append({"id": item_id, "reason": "not found"})
+        except ValueError:
+            failed.append({"id": item_id, "reason": "invalid UUID"})
+
+    db.commit()
+
+    return {
+        "deleted": deleted,
+        "failed": failed
+    }
+
+
 @router.get("", response_class=HTMLResponse)
 async def calibration_ui():
     """

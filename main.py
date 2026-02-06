@@ -6,12 +6,18 @@ Replaces Google Drive backend with direct database access.
 
 import os
 import json
+import hmac
+import time
+import hashlib
 import logging
+import re
 from datetime import datetime
 from typing import Optional, List, Dict, Any
+from urllib.parse import urlencode
 
-from fastapi import FastAPI, HTTPException, Response, Query, Depends, Security, Header
+from fastapi import FastAPI, HTTPException, Response, Query, Depends, Security, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
@@ -25,6 +31,7 @@ from db import (
     Run,
     TriModelEvent,
     MustRead,
+    WeeklyDigestFeedback,
     Publication,
     PublicationEmbedding,
     EMBEDDING_DIMENSION,
@@ -48,6 +55,9 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+FEEDBACK_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+FEEDBACK_SIGNATURE_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+FEEDBACK_SIGNED_KEYS = ("p", "w", "e", "v", "t")
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -57,6 +67,26 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
+
+# Basic request logging middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    source_ip = request.headers.get("x-forwarded-for")
+    if source_ip:
+        source_ip = source_ip.split(",")[0].strip()
+    elif request.client:
+        source_ip = request.client.host
+    else:
+        source_ip = "unknown"
+
+    try:
+        response = await call_next(request)
+        logger.info("request status=%s path=%s ip=%s", response.status_code, request.url.path, source_ip)
+        return response
+    except Exception:
+        logger.exception("request status=500 path=%s ip=%s", request.url.path, source_ip)
+        raise
+
 
 # Database initialization on startup
 @app.on_event("startup")
@@ -99,6 +129,51 @@ if not ACITRACK_API_KEY:
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
+def build_feedback_canonical_query(params: Dict[str, str]) -> str:
+    """
+    Build canonical query string from required signed keys only.
+    """
+    canonical_items = [(key, str(params[key])) for key in sorted(FEEDBACK_SIGNED_KEYS)]
+    return urlencode(canonical_items)
+
+
+def html_message_page(message: str) -> str:
+    """
+    Minimal HTML response template for feedback endpoints.
+    """
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AciTrack Feedback</title>
+</head>
+<body>
+  <p>{message}</p>
+</body>
+</html>
+"""
+
+
+def get_feedback_max_age_seconds() -> int:
+    """
+    Resolve feedback link max age from env with safe default.
+    """
+    default_max_age = 7776000
+    raw_value = os.getenv("FEEDBACK_MAX_AGE_SECONDS", str(default_max_age))
+    try:
+        max_age = int(raw_value)
+        if max_age <= 0:
+            raise ValueError("must be > 0")
+        return max_age
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid FEEDBACK_MAX_AGE_SECONDS value '%s'; using default %s",
+            raw_value,
+            default_max_age
+        )
+        return default_max_age
+
 
 async def verify_api_key(api_key: Optional[str] = Security(api_key_header)):
     """
@@ -124,6 +199,127 @@ async def verify_api_key(api_key: Optional[str] = Security(api_key_header)):
     return api_key
 
 
+@app.get("/feedback", response_class=HTMLResponse)
+async def record_feedback(
+    request: Request,
+    p: Optional[str] = Query(default=None, description="publication_id"),
+    w: Optional[str] = Query(default=None, description="week_start YYYY-MM-DD"),
+    e: Optional[str] = Query(default=None, description="week_end YYYY-MM-DD"),
+    v: Optional[str] = Query(default=None, description="vote up|down"),
+    t: Optional[str] = Query(default=None, description="unix timestamp seconds"),
+    s: Optional[str] = Query(default=None, description="hex hmac signature"),
+    db: Session = Depends(get_db),
+):
+    """
+    Public endpoint to record weekly digest thumbs up/down feedback from email links.
+    """
+    if not p or not w or not e or not v or not t or not s:
+        return HTMLResponse(
+            content=html_message_page("Missing required feedback parameters."),
+            status_code=400
+        )
+
+    if not FEEDBACK_DATE_RE.fullmatch(w) or not FEEDBACK_DATE_RE.fullmatch(e):
+        return HTMLResponse(
+            content=html_message_page("Invalid week_start/week_end format. Use YYYY-MM-DD."),
+            status_code=400
+        )
+
+    try:
+        week_start = datetime.strptime(w, "%Y-%m-%d").date()
+        week_end = datetime.strptime(e, "%Y-%m-%d").date()
+    except ValueError:
+        return HTMLResponse(
+            content=html_message_page("Invalid week_start/week_end date values."),
+            status_code=400
+        )
+
+    if v not in {"up", "down"}:
+        return HTMLResponse(
+            content=html_message_page("Invalid vote value. Use 'up' or 'down'."),
+            status_code=400
+        )
+
+    if not t.isdigit():
+        return HTMLResponse(
+            content=html_message_page("Invalid timestamp."),
+            status_code=400
+        )
+    timestamp_seconds = int(t)
+
+    if not FEEDBACK_SIGNATURE_RE.fullmatch(s):
+        return HTMLResponse(
+            content=html_message_page("Invalid signature format."),
+            status_code=400
+        )
+
+    feedback_secret = os.getenv("DIGEST_FEEDBACK_SECRET")
+    if not feedback_secret:
+        logger.error("DIGEST_FEEDBACK_SECRET is not configured; feedback endpoint unavailable")
+        return HTMLResponse(
+            content=html_message_page("Feedback endpoint is not configured."),
+            status_code=500
+        )
+
+    max_age_seconds = get_feedback_max_age_seconds()
+    now_seconds = int(time.time())
+    if timestamp_seconds < (now_seconds - max_age_seconds):
+        return HTMLResponse(
+            content=html_message_page("This feedback link has expired."),
+            status_code=410
+        )
+
+    canonical_query = build_feedback_canonical_query(
+        {"p": p, "w": w, "e": e, "v": v, "t": str(timestamp_seconds)}
+    )
+    expected_signature = hmac.new(
+        feedback_secret.encode("utf-8"),
+        canonical_query.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(expected_signature, s.lower()):
+        return HTMLResponse(
+            content=html_message_page("Invalid feedback signature."),
+            status_code=403
+        )
+
+    source_ip = request.headers.get("x-forwarded-for")
+    if source_ip:
+        source_ip = source_ip.split(",")[0].strip()
+    elif request.client:
+        source_ip = request.client.host
+    else:
+        source_ip = None
+    user_agent = request.headers.get("user-agent")
+
+    feedback = WeeklyDigestFeedback(
+        week_start=week_start,
+        week_end=week_end,
+        publication_id=p,
+        vote=v,
+        source_ip=source_ip,
+        user_agent=user_agent,
+        context_json=json.dumps({"t": timestamp_seconds}),
+    )
+
+    try:
+        db.add(feedback)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to persist weekly digest feedback for publication_id=%s", p)
+        return HTMLResponse(
+            content=html_message_page("Unable to record feedback right now."),
+            status_code=500
+        )
+
+    return HTMLResponse(
+        content=html_message_page("Thanks, your feedback was recorded."),
+        status_code=200
+    )
+
+
 # Root endpoint
 @app.get("/")
 async def root():
@@ -136,6 +332,7 @@ async def root():
         "description": "Postgres-backed API for academic publication tracking with semantic search",
         "endpoints": {
             "health": "/health",
+            "feedback": "/feedback?p=<publication_id>&w=<week_start>&e=<week_end>&v=<up|down>&t=<unix_ts>&s=<hex_signature>",
             "runs": {
                 "latest": "/runs/latest?mode=tri-model-daily|daily|weekly",
                 "by_id": "/runs/{run_id}"

@@ -49,6 +49,8 @@ AciTrack Backend provides HTTPS endpoints to access academic publication reports
    ```bash
    export DATABASE_URL="postgresql://user:password@host:port/database"
    export ACITRACK_API_KEY="your-secret-api-key"
+   export DIGEST_FEEDBACK_SECRET="your-digest-feedback-secret"
+   export FEEDBACK_MAX_AGE_SECONDS="7776000"  # optional
    ```
 
 5. **Test database connection** (optional)
@@ -89,6 +91,33 @@ Health check endpoint for monitoring service and database status.
   "db_host": "postgres.render.internal:5432",
   "time": "2025-01-24T10:30:00.000Z"
 }
+```
+
+#### `GET /feedback`
+Public endpoint for weekly digest thumbs up/down links. Returns a simple HTML page.
+
+**Query Parameters (all required):**
+- `p`: publication_id
+- `w`: week_start (`YYYY-MM-DD`)
+- `e`: week_end (`YYYY-MM-DD`)
+- `v`: vote (`up` or `down`)
+- `t`: unix timestamp seconds
+- `s`: HMAC-SHA256 hex signature
+
+**Signed URL format:**
+```text
+/feedback?p=<publication_id>&w=<week_start>&e=<week_end>&v=<up|down>&t=<unix_ts>&s=<hex_signature>
+```
+
+**Canonical signature input:**
+- Use only keys `p,w,e,v,t`
+- Stringify values
+- Sort by key
+- URL-encode as query string
+
+**Example:**
+```text
+/feedback?p=pub-123&w=2026-01-05&e=2026-01-11&v=up&t=1736035200&s=1c7759a2abaee58aec9daba5233341b87dbc2f33f220d188131cfca11f5312ec
 ```
 
 ### Read Endpoints (Require API Key)
@@ -486,6 +515,7 @@ Tables created:
 - **runs**: Run metadata (run_id, mode, timestamps, JSON configs)
 - **tri_model_events**: Tri-model evaluations (run_id, publication_id, agreement, reviews)
 - **must_reads**: Must-read decisions per run (run_id, must_reads_json)
+- **weekly_digest_feedback**: Digest click feedback (publication_id, week window, vote, request metadata)
 
 For production schema changes, use Alembic migrations (see Development section).
 
@@ -497,6 +527,8 @@ For production schema changes, use Alembic migrations (see Development section).
 |----------|----------|---------|-------------|
 | `DATABASE_URL` | Yes | - | Postgres connection string (format: `postgresql://user:pass@host:port/db`). SSL mode automatically added for Render. |
 | `ACITRACK_API_KEY` | Yes | - | Secret API key for X-API-Key header authentication |
+| `DIGEST_FEEDBACK_SECRET` | Yes | - | Secret used to verify `GET /feedback` signed links |
+| `FEEDBACK_MAX_AGE_SECONDS` | No | `7776000` | Max age for signed feedback links (default 90 days) |
 | `PORT` | No | `8000` | Port to run server (auto-set by Render to `10000`) |
 | `LOG_LEVEL` | No | `INFO` | Logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `PYTHON_VERSION` | No | `3.11.0` | Python version (Render-specific) |
@@ -509,12 +541,13 @@ Safe for local development: if `sslmode` is already in your local DATABASE_URL, 
 
 ## Security
 
-- **API key authentication** via `X-API-Key` header (required for all endpoints except `/` and `/health`)
+- **API key authentication** via `X-API-Key` header (required for protected read/ingest endpoints)
 - **HTTPS enforced** by Render platform
 - **SSL/TLS** for Postgres connections (automatic)
 - **CORS restricted** to OpenAI domains (`chat.openai.com`, `chatgpt.com`)
 - **Read-only Custom GPT access** (uses read endpoints only)
 - **Ingest endpoints** require same API key (used by internal pipeline)
+- **Digest feedback signatures** verified with `DIGEST_FEEDBACK_SECRET` using HMAC-SHA256
 
 ## Custom GPT Integration
 

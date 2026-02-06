@@ -14,7 +14,9 @@ from sqlalchemy import (
     Column,
     String,
     Integer,
+    BigInteger,
     Float,
+    Date,
     DateTime,
     Text,
     Index,
@@ -152,6 +154,23 @@ class MustRead(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class WeeklyDigestFeedback(Base):
+    """
+    Stores thumbs up/down feedback clicks from weekly digest emails.
+    """
+    __tablename__ = "weekly_digest_feedback"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, server_default=text("NOW()"), nullable=False)
+    week_start = Column(Date, nullable=False)
+    week_end = Column(Date, nullable=False)
+    publication_id = Column(Text, nullable=False)
+    vote = Column(Text, nullable=False)
+    source_ip = Column(Text, nullable=True)
+    user_agent = Column(Text, nullable=True)
+    context_json = Column(Text, nullable=True)
 
 
 class Publication(Base):

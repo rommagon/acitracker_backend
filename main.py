@@ -11,7 +11,7 @@ import time
 import hashlib
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from urllib.parse import urlencode
 
@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, and_, or_, text
+from sqlalchemy import desc, and_, or_, text, func, case
 
 from db import (
     get_db,
@@ -199,6 +199,109 @@ async def verify_api_key(api_key: Optional[str] = Security(api_key_header)):
     return api_key
 
 
+def extract_summary(*json_texts) -> Optional[str]:
+    """
+    Extract a summary from one or more JSON strings.
+    Searches for summary-like keys at top level and one level deep.
+    Returns the first non-empty string found.
+    """
+    summary_keys = ["final_summary", "summary", "short_summary", "one_sentence_summary", "lay_summary"]
+    nested_keys = ["result", "analysis", "output", "data", "response"]
+
+    for txt in json_texts:
+        if not txt:
+            continue
+        try:
+            obj = json.loads(txt)
+        except Exception:
+            continue
+
+        if not isinstance(obj, dict):
+            continue
+
+        for k in summary_keys:
+            v = obj.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+
+        for nested_key in nested_keys:
+            nested = obj.get(nested_key)
+            if isinstance(nested, dict):
+                for k in summary_keys:
+                    v = nested.get(k)
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+
+    return None
+
+
+def safe_json_parse(json_str: Optional[str]) -> Optional[dict]:
+    """Safely parse a JSON string, returning None on failure."""
+    if not json_str:
+        return None
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        return None
+
+
+def extract_llm_subscores(event) -> dict:
+    """
+    Extract individual model relevancy scores from a TriModelEvent.
+    Returns dict with claude_score, gemini_score, gpt_score keys.
+    """
+    scores = {"claude_score": None, "gemini_score": None, "gpt_score": None}
+
+    claude_review = safe_json_parse(event.claude_review_json)
+    if claude_review and isinstance(claude_review, dict):
+        scores["claude_score"] = claude_review.get("relevancy_score") or claude_review.get("score")
+
+    gemini_review = safe_json_parse(event.gemini_review_json)
+    if gemini_review and isinstance(gemini_review, dict):
+        scores["gemini_score"] = gemini_review.get("relevancy_score") or gemini_review.get("score")
+
+    gpt_eval = safe_json_parse(event.gpt_eval_json)
+    if gpt_eval and isinstance(gpt_eval, dict):
+        scores["gpt_score"] = gpt_eval.get("relevancy_score") or gpt_eval.get("score")
+
+    return scores
+
+
+def build_paper_detail(event, publication=None) -> dict:
+    """
+    Build a detailed paper dict from a TriModelEvent and optional Publication.
+    Used across CustomGPT-facing endpoints.
+    """
+    subscores = extract_llm_subscores(event)
+    summary = extract_summary(
+        event.gpt_eval_json,
+        event.claude_review_json,
+        event.gemini_review_json,
+    )
+
+    url = None
+    source = None
+    published_date = None
+    if publication:
+        url = publication.url
+        source = publication.source
+        published_date = publication.published_date
+
+    return {
+        "publication_id": event.publication_id,
+        "title": event.title,
+        "url": url,
+        "source": source,
+        "published_date": published_date.isoformat() if published_date else None,
+        "final_relevancy_score": event.final_relevancy_score,
+        "agreement_level": event.agreement_level,
+        "disagreements": event.disagreements,
+        "evaluator_rationale": event.evaluator_rationale,
+        "summary": summary,
+        "subscores": subscores,
+    }
+
+
 @app.get("/feedback", response_class=HTMLResponse)
 async def record_feedback(
     request: Request,
@@ -343,6 +446,12 @@ async def root():
             "search": {
                 "publications": "/search/publications?q=...&limit=20&min_relevancy=&min_credibility=&date_from=&date_to=",
                 "status": "/search/status"
+            },
+            "customgpt": {
+                "daily_must_reads": "/daily-must-reads?threshold=60",
+                "weekly_must_reads": "/weekly-must-reads?top_n=5&days=7",
+                "stats": "/stats",
+                "whats_new": "/whats-new"
             },
             "ingest": {
                 "run": "POST /ingest/run",
@@ -573,15 +682,6 @@ async def get_paper(
             detail=f"No tri-model event found for publication_id={publication_id}"
         )
 
-    # Parse JSON fields
-    def safe_json_parse(json_str):
-        if not json_str:
-            return None
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            return None
-
     return {
         "id": event.id,
         "run_id": event.run_id,
@@ -637,15 +737,6 @@ async def get_disagreements(
 
     results = []
     for event in events:
-        # Parse JSON fields to compute score delta if min_delta is specified
-        def safe_json_parse(json_str):
-            if not json_str:
-                return None
-            try:
-                return json.loads(json_str)
-            except json.JSONDecodeError:
-                return None
-
         claude_review = safe_json_parse(event.claude_review_json)
         gemini_review = safe_json_parse(event.gemini_review_json)
 
@@ -1438,6 +1529,391 @@ async def search_status(
         "total_unique_publications": total_publications,
         "coverage_percent": round(100 * embedding_count / total_publications, 1) if total_publications > 0 else 0,
         "search_available": PGVECTOR_AVAILABLE and is_embedding_available() and embedding_count > 0,
+    }
+
+
+# ── CustomGPT Endpoints ──────────────────────────────────────────────
+
+
+# GET /daily-must-reads
+@app.get("/daily-must-reads")
+async def get_daily_must_reads(
+    threshold: float = Query(default=60.0, ge=0, le=100, description="Minimum final_relevancy_score to include"),
+    db: Session = Depends(get_db),
+    api_key: Optional[str] = Depends(verify_api_key),
+):
+    """
+    Get today's must-read papers from the latest daily run, enriched with
+    publication URLs, LLM subscores, and summaries. Papers below the
+    threshold are excluded. A note is included when fewer than 5 papers
+    meet the threshold.
+    """
+    # Get latest daily run
+    run = db.query(Run).filter(
+        Run.mode == "tri-model-daily"
+    ).order_by(desc(Run.started_at)).first()
+
+    if not run:
+        raise HTTPException(status_code=404, detail="No daily runs found")
+
+    # Get must-reads for this run
+    must_read = db.query(MustRead).filter(MustRead.run_id == run.run_id).first()
+    if not must_read:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No must-reads found for run_id={run.run_id}"
+        )
+
+    # Parse must-reads and extract publication IDs
+    must_reads_data = json.loads(must_read.must_reads_json)
+    pub_ids = []
+    for item in must_reads_data:
+        if isinstance(item, dict) and "publication_id" in item:
+            pub_ids.append(item["publication_id"])
+        elif isinstance(item, str):
+            pub_ids.append(item)
+
+    if not pub_ids:
+        return {
+            "run_id": run.run_id,
+            "mode": run.mode,
+            "run_date": run.started_at.isoformat() if run.started_at else None,
+            "threshold": threshold,
+            "total_must_reads": 0,
+            "above_threshold": 0,
+            "below_threshold_count": 0,
+            "note": "No must-read publications found for this run.",
+            "papers": [],
+        }
+
+    # Fetch events and publications
+    events = db.query(TriModelEvent).filter(
+        TriModelEvent.run_id == run.run_id,
+        TriModelEvent.publication_id.in_(pub_ids),
+    ).all()
+
+    publications = {
+        p.publication_id: p
+        for p in db.query(Publication).filter(
+            Publication.publication_id.in_(pub_ids)
+        ).all()
+    }
+
+    # Build results with threshold filter
+    papers = []
+    below_count = 0
+    for event in events:
+        pub = publications.get(event.publication_id)
+        detail = build_paper_detail(event, pub)
+
+        if event.final_relevancy_score is not None and event.final_relevancy_score >= threshold:
+            papers.append(detail)
+        else:
+            below_count += 1
+
+    papers.sort(key=lambda x: x["final_relevancy_score"] or 0, reverse=True)
+
+    note = None
+    if len(papers) < 5:
+        note = (
+            f"Only {len(papers)} paper(s) met the threshold of {threshold} "
+            f"(fewer than 5). There were {below_count} paper(s) below the threshold."
+        )
+
+    return {
+        "run_id": run.run_id,
+        "mode": run.mode,
+        "run_date": run.started_at.isoformat() if run.started_at else None,
+        "threshold": threshold,
+        "total_must_reads": len(events),
+        "above_threshold": len(papers),
+        "below_threshold_count": below_count,
+        "note": note,
+        "papers": papers,
+    }
+
+
+# GET /weekly-must-reads
+@app.get("/weekly-must-reads")
+async def get_weekly_must_reads(
+    top_n: int = Query(default=5, ge=1, le=20, description="Number of top papers to return"),
+    days: int = Query(default=7, ge=1, le=30, description="Number of days to look back"),
+    db: Session = Depends(get_db),
+    api_key: Optional[str] = Depends(verify_api_key),
+):
+    """
+    Get the top N highest-scored papers from the past N days.
+    Deduplicates by publication_id and returns enriched details
+    with URLs, LLM subscores, and summaries.
+    """
+    cutoff = datetime.utcnow() - timedelta(days=days)
+
+    # Get the best score per publication in the window
+    subq = db.query(
+        TriModelEvent.publication_id,
+        func.max(TriModelEvent.final_relevancy_score).label("best_score"),
+    ).filter(
+        TriModelEvent.created_at >= cutoff,
+        TriModelEvent.final_relevancy_score.isnot(None),
+    ).group_by(
+        TriModelEvent.publication_id,
+    ).subquery()
+
+    # Join back to get full event rows
+    events = db.query(TriModelEvent).join(
+        subq,
+        and_(
+            TriModelEvent.publication_id == subq.c.publication_id,
+            TriModelEvent.final_relevancy_score == subq.c.best_score,
+        ),
+    ).filter(
+        TriModelEvent.created_at >= cutoff,
+    ).order_by(
+        desc(TriModelEvent.final_relevancy_score),
+    ).limit(top_n).all()
+
+    # Batch fetch publications
+    pub_ids = [e.publication_id for e in events]
+    publications = {
+        p.publication_id: p
+        for p in db.query(Publication).filter(
+            Publication.publication_id.in_(pub_ids)
+        ).all()
+    } if pub_ids else {}
+
+    papers = []
+    for event in events:
+        pub = publications.get(event.publication_id)
+        papers.append(build_paper_detail(event, pub))
+
+    # Week stats
+    total_scored_this_period = db.query(func.count(TriModelEvent.id)).filter(
+        TriModelEvent.created_at >= cutoff,
+    ).scalar() or 0
+
+    avg_score_this_period = db.query(
+        func.avg(TriModelEvent.final_relevancy_score),
+    ).filter(
+        TriModelEvent.created_at >= cutoff,
+        TriModelEvent.final_relevancy_score.isnot(None),
+    ).scalar()
+
+    return {
+        "period": {
+            "from": cutoff.isoformat(),
+            "to": datetime.utcnow().isoformat(),
+            "days": days,
+        },
+        "total_scored_this_period": total_scored_this_period,
+        "average_score_this_period": round(float(avg_score_this_period), 1) if avg_score_this_period else None,
+        "top_n": top_n,
+        "papers": papers,
+    }
+
+
+# GET /stats
+@app.get("/stats")
+async def get_stats(
+    db: Session = Depends(get_db),
+    api_key: Optional[str] = Depends(verify_api_key),
+):
+    """
+    Aggregate statistics about Science Agent: publication counts,
+    scoring distributions, embedding coverage, and system metrics.
+    """
+    now = datetime.utcnow()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = today_start - timedelta(days=7)
+
+    # Core counts
+    total_publications = db.query(func.count(Publication.publication_id)).scalar() or 0
+    total_scored = db.query(func.count(TriModelEvent.id)).scalar() or 0
+    unique_scored = db.query(func.count(func.distinct(TriModelEvent.publication_id))).scalar() or 0
+    scored_today = db.query(func.count(TriModelEvent.id)).filter(
+        TriModelEvent.created_at >= today_start,
+    ).scalar() or 0
+    scored_this_week = db.query(func.count(TriModelEvent.id)).filter(
+        TriModelEvent.created_at >= week_start,
+    ).scalar() or 0
+
+    # Latest run info
+    latest_run = db.query(Run).filter(
+        Run.mode == "tri-model-daily",
+    ).order_by(desc(Run.started_at)).first()
+
+    latest_run_info = None
+    if latest_run:
+        counts = safe_json_parse(latest_run.counts_json) or {}
+        latest_run_info = {
+            "run_id": latest_run.run_id,
+            "started_at": latest_run.started_at.isoformat() if latest_run.started_at else None,
+            "window_start": latest_run.window_start.isoformat() if latest_run.window_start else None,
+            "window_end": latest_run.window_end.isoformat() if latest_run.window_end else None,
+            "counts": counts,
+        }
+
+    # Embedding coverage
+    total_embeddings = db.query(func.count(PublicationEmbedding.publication_id)).filter(
+        PublicationEmbedding.embedding.isnot(None),
+    ).scalar() or 0
+    embedding_coverage_pct = round(100 * total_embeddings / unique_scored, 1) if unique_scored > 0 else 0
+
+    # Agreement distribution
+    agreement_rows = db.query(
+        TriModelEvent.agreement_level,
+        func.count(TriModelEvent.id),
+    ).group_by(TriModelEvent.agreement_level).all()
+    agreement_distribution = {row[0] or "unknown": row[1] for row in agreement_rows}
+
+    # Average relevancy score
+    avg_relevancy = db.query(
+        func.avg(TriModelEvent.final_relevancy_score),
+    ).filter(
+        TriModelEvent.final_relevancy_score.isnot(None),
+    ).scalar()
+
+    # Score distribution buckets
+    score_buckets_rows = db.query(
+        case(
+            (TriModelEvent.final_relevancy_score < 20, "0-19"),
+            (TriModelEvent.final_relevancy_score < 40, "20-39"),
+            (TriModelEvent.final_relevancy_score < 60, "40-59"),
+            (TriModelEvent.final_relevancy_score < 80, "60-79"),
+            else_="80-100",
+        ).label("bucket"),
+        func.count(TriModelEvent.id),
+    ).filter(
+        TriModelEvent.final_relevancy_score.isnot(None),
+    ).group_by("bucket").all()
+    score_distribution = {row[0]: row[1] for row in score_buckets_rows}
+
+    # Total runs
+    total_runs = db.query(func.count(Run.run_id)).scalar() or 0
+
+    return {
+        "generated_at": now.isoformat(),
+        "publications": {
+            "total_found": total_publications,
+            "total_scored": total_scored,
+            "unique_scored": unique_scored,
+            "scored_today": scored_today,
+            "scored_this_week": scored_this_week,
+        },
+        "latest_daily_run": latest_run_info,
+        "embeddings": {
+            "total_embedded": total_embeddings,
+            "coverage_percent": embedding_coverage_pct,
+        },
+        "scoring": {
+            "average_relevancy_score": round(float(avg_relevancy), 1) if avg_relevancy else None,
+            "score_distribution": score_distribution,
+            "agreement_distribution": agreement_distribution,
+        },
+        "system": {
+            "total_runs": total_runs,
+        },
+    }
+
+
+# GET /whats-new
+@app.get("/whats-new")
+async def get_whats_new(
+    db: Session = Depends(get_db),
+    api_key: Optional[str] = Depends(verify_api_key),
+):
+    """
+    Quick daily report about the latest run: how many papers were found,
+    top papers, high-agreement highlights, and notable disagreements.
+    """
+    # Latest daily run
+    run = db.query(Run).filter(
+        Run.mode == "tri-model-daily",
+    ).order_by(desc(Run.started_at)).first()
+
+    if not run:
+        raise HTTPException(status_code=404, detail="No daily runs found")
+
+    # All events for this run
+    events = db.query(TriModelEvent).filter(
+        TriModelEvent.run_id == run.run_id,
+    ).all()
+
+    if not events:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No events found for run_id={run.run_id}",
+        )
+
+    # Batch fetch publications
+    pub_ids = [e.publication_id for e in events]
+    publications = {
+        p.publication_id: p
+        for p in db.query(Publication).filter(
+            Publication.publication_id.in_(pub_ids)
+        ).all()
+    }
+
+    # Compute analytics
+    scored_events = [e for e in events if e.final_relevancy_score is not None]
+    high_scoring = [e for e in scored_events if e.final_relevancy_score >= 60]
+    high_agreement = [e for e in events if e.agreement_level == "high"]
+    low_agreement = [e for e in events if e.agreement_level == "low"]
+
+    avg_score = (
+        sum(e.final_relevancy_score for e in scored_events) / len(scored_events)
+        if scored_events else None
+    )
+
+    # Top 5 papers by score
+    sorted_events = sorted(scored_events, key=lambda e: e.final_relevancy_score or 0, reverse=True)
+    top_papers = [
+        build_paper_detail(e, publications.get(e.publication_id))
+        for e in sorted_events[:5]
+    ]
+
+    # High agreement highlights (top 3 by score among high-agreement)
+    high_agreement_sorted = sorted(
+        high_agreement, key=lambda e: e.final_relevancy_score or 0, reverse=True,
+    )
+    high_agreement_papers = [
+        build_paper_detail(e, publications.get(e.publication_id))
+        for e in high_agreement_sorted[:3]
+    ]
+
+    # Notable disagreements (top 3 by score delta among low-agreement)
+    disagreement_papers = []
+    for event in low_agreement:
+        subscores = extract_llm_subscores(event)
+        score_values = [v for v in subscores.values() if v is not None]
+        delta = (max(score_values) - min(score_values)) if len(score_values) >= 2 else 0
+        detail = build_paper_detail(event, publications.get(event.publication_id))
+        detail["max_score_delta"] = round(delta, 1) if delta else 0
+        disagreement_papers.append(detail)
+
+    disagreement_papers.sort(key=lambda x: x.get("max_score_delta", 0), reverse=True)
+    disagreement_papers = disagreement_papers[:3]
+
+    # Run counts from counts_json
+    counts = safe_json_parse(run.counts_json) or {}
+
+    return {
+        "run_id": run.run_id,
+        "run_date": run.started_at.isoformat() if run.started_at else None,
+        "window": {
+            "start": run.window_start.isoformat() if run.window_start else None,
+            "end": run.window_end.isoformat() if run.window_end else None,
+        },
+        "run_counts": counts,
+        "summary": {
+            "total_papers_scored": len(scored_events),
+            "papers_above_60": len(high_scoring),
+            "average_score": round(avg_score, 1) if avg_score else None,
+            "high_agreement_count": len(high_agreement),
+            "low_agreement_count": len(low_agreement),
+        },
+        "top_papers": top_papers,
+        "high_agreement_highlights": high_agreement_papers,
+        "notable_disagreements": disagreement_papers,
     }
 
 

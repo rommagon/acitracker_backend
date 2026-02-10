@@ -2,6 +2,7 @@
 Calibration Tool API endpoints for human relevancy labeling.
 Allows employees to rate publications and calibrate tri-model scoring.
 """
+from __future__ import annotations
 
 import os
 import json

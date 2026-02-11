@@ -1726,10 +1726,36 @@ async def get_weekly_must_reads(
         ).all()
     } if pub_ids else {}
 
+    # Build must-reads lookup for credibility enrichment
+    # Gather all run_ids from the events, then load their must-reads
+    mr_items_by_id = {}
+    if pub_ids:
+        run_ids = list({e.run_id for e in events})
+        must_reads = db.query(MustRead).filter(
+            MustRead.run_id.in_(run_ids)
+        ).all()
+        for mr in must_reads:
+            try:
+                mr_raw = json.loads(mr.must_reads_json)
+                if isinstance(mr_raw, dict) and "must_reads" in mr_raw:
+                    mr_list = mr_raw["must_reads"]
+                elif isinstance(mr_raw, list):
+                    mr_list = mr_raw
+                else:
+                    mr_list = []
+                for item in mr_list:
+                    if isinstance(item, dict):
+                        pid = item.get("publication_id") or item.get("id")
+                        if pid and pid not in mr_items_by_id:
+                            mr_items_by_id[pid] = item
+            except (json.JSONDecodeError, TypeError):
+                continue
+
     papers = []
     for event in events:
         pub = publications.get(event.publication_id)
-        papers.append(build_paper_detail(event, pub))
+        mr_item = mr_items_by_id.get(event.publication_id)
+        papers.append(build_paper_detail(event, pub, must_read_item=mr_item))
 
     # Week stats
     total_scored_this_period = db.query(func.count(TriModelEvent.id)).filter(

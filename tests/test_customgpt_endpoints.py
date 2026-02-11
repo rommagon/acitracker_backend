@@ -250,13 +250,18 @@ class TestWeeklyMustReads:
         response = test_client.get("/weekly-must-reads")
         assert response.status_code == 401
 
-    def test_returns_top_papers(self, client):
+    def test_returns_top_papers_with_credibility(self, client):
         test_client, mock_db = client
 
-        event1 = make_event(pub_id="pub-001", score=95.0)
-        event2 = make_event(pub_id="pub-002", score=88.0, title="Second Paper")
+        event1 = make_event(pub_id="pub-001", score=95.0, run_id="run-2026-02-10")
+        event2 = make_event(pub_id="pub-002", score=88.0, title="Second Paper", run_id="run-2026-02-10")
         pub1 = make_publication(pub_id="pub-001")
         pub2 = make_publication(pub_id="pub-002", title="Second Paper")
+        must_read = make_must_read(
+            run_id="run-2026-02-10",
+            pub_ids=["pub-001", "pub-002"],
+            use_id_key=True,
+        )
 
         # Use a flexible chainable mock that returns sensible defaults
         chain_mock = MagicMock()
@@ -273,9 +278,14 @@ class TestWeeklyMustReads:
         pub_mock = MagicMock()
         pub_mock.filter.return_value.all.return_value = [pub1, pub2]
 
+        mr_mock = MagicMock()
+        mr_mock.filter.return_value.all.return_value = [must_read]
+
         def side_effect_query(*args):
             if len(args) == 1 and args[0] is Publication:
                 return pub_mock
+            if len(args) == 1 and args[0] is MustRead:
+                return mr_mock
             return chain_mock
 
         mock_db.query.side_effect = side_effect_query
@@ -286,6 +296,9 @@ class TestWeeklyMustReads:
         assert "papers" in data
         assert "period" in data
         assert data["period"]["days"] == 7
+        # Verify credibility data flows through from must-reads
+        assert data["papers"][0]["credibility_score"] == 75
+        assert data["papers"][0]["credibility_reason"] == "Peer-reviewed journal article with strong methodology."
 
     def test_empty_period(self, client):
         test_client, mock_db = client

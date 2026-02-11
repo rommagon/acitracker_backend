@@ -277,10 +277,11 @@ def extract_llm_subscores(event) -> dict:
     }
 
 
-def build_paper_detail(event, publication=None) -> dict:
+def build_paper_detail(event, publication=None, must_read_item=None) -> dict:
     """
     Build a detailed paper dict from a TriModelEvent and optional Publication.
-    Used across CustomGPT-facing endpoints.
+    If must_read_item (dict from must_reads_json) is provided, it enriches
+    the result with credibility data and fills in any missing metadata.
     """
     subscores = extract_llm_subscores(event)
     summary = extract_summary(
@@ -297,19 +298,36 @@ def build_paper_detail(event, publication=None) -> dict:
         source = publication.source
         published_date = publication.published_date
 
-    return {
+    # Enrich from must_read_item if available (pipeline stores rich data there)
+    mr = must_read_item or {}
+    if not url:
+        url = mr.get("url")
+    if not source:
+        source = mr.get("source")
+    if not published_date and mr.get("published_date"):
+        published_date = mr.get("published_date")  # already a string
+
+    # Format published_date
+    if published_date and not isinstance(published_date, str):
+        published_date = published_date.isoformat()
+
+    result = {
         "publication_id": event.publication_id,
         "title": event.title,
         "url": url,
         "source": source,
-        "published_date": published_date.isoformat() if published_date else None,
+        "published_date": published_date,
         "final_relevancy_score": event.final_relevancy_score,
         "agreement_level": event.agreement_level,
         "disagreements": event.disagreements,
         "evaluator_rationale": event.evaluator_rationale,
         "summary": summary,
         "subscores": subscores,
+        "credibility_score": mr.get("credibility_score"),
+        "credibility_reason": mr.get("credibility_reason"),
     }
+
+    return result
 
 
 @app.get("/feedback", response_class=HTMLResponse)
@@ -1585,13 +1603,17 @@ async def get_daily_must_reads(
     else:
         must_reads_data = []
 
+    # Build lookup of must-reads items keyed by publication id
+    # (these contain credibility data, source, etc. from the pipeline)
     pub_ids = []
+    mr_items_by_id = {}
     for item in must_reads_data:
         if isinstance(item, dict):
             # Pipeline uses "id"; older format may use "publication_id"
             pid = item.get("publication_id") or item.get("id")
             if pid:
                 pub_ids.append(pid)
+                mr_items_by_id[pid] = item
         elif isinstance(item, str):
             pub_ids.append(item)
 
@@ -1626,7 +1648,8 @@ async def get_daily_must_reads(
     below_count = 0
     for event in events:
         pub = publications.get(event.publication_id)
-        detail = build_paper_detail(event, pub)
+        mr_item = mr_items_by_id.get(event.publication_id)
+        detail = build_paper_detail(event, pub, must_read_item=mr_item)
 
         if event.final_relevancy_score is not None and event.final_relevancy_score >= threshold:
             papers.append(detail)

@@ -82,7 +82,16 @@ def make_must_read(run_id="run-2026-02-10", pub_ids=None, use_id_key=False):
         # Production format: nested dict wrapper with "id" key
         mr.must_reads_json = json.dumps({
             "run_id": run_id,
-            "must_reads": [{"id": pid, "title": f"Paper {pid}"} for pid in pub_ids],
+            "must_reads": [
+                {
+                    "id": pid,
+                    "title": f"Paper {pid}",
+                    "source": "Nature Medicine",
+                    "credibility_score": 75,
+                    "credibility_reason": "Peer-reviewed journal article with strong methodology.",
+                }
+                for pid in pub_ids
+            ],
         })
     else:
         # Simple format: flat list with "publication_id" key
@@ -227,6 +236,9 @@ class TestDailyMustReads:
         # Verify GPT score is now extracted (uses final_relevancy_score key)
         assert data["papers"][0]["subscores"]["gpt_score"] == 80
         assert data["papers"][1]["subscores"]["gpt_score"] == 70
+        # Verify credibility data flows from must-reads JSON
+        assert data["papers"][0]["credibility_score"] == 75
+        assert data["papers"][0]["credibility_reason"] == "Peer-reviewed journal article with strong methodology."
 
 
 # ─── /weekly-must-reads ──────────────────────────────────────────────

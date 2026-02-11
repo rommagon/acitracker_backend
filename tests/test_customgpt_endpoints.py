@@ -52,7 +52,7 @@ def make_event(pub_id="pub-001", title="Test Paper", score=85.0, agreement="high
     event.evaluator_rationale = "Highly relevant to ACI detection."
     event.claude_review_json = json.dumps({"relevancy_score": claude_score, "summary": "Claude summary."})
     event.gemini_review_json = json.dumps({"relevancy_score": gemini_score, "summary": "Gemini summary."})
-    event.gpt_eval_json = json.dumps({"relevancy_score": gpt_score, "summary": "GPT summary."})
+    event.gpt_eval_json = json.dumps({"final_relevancy_score": gpt_score, "final_summary": "GPT summary."})
     event.final_relevancy_score = score
     event.created_at = datetime(2026, 2, 10, 6, 0, 0)
     return event
@@ -71,13 +71,22 @@ def make_publication(pub_id="pub-001", title="Test Paper", url="https://pubmed.n
     return pub
 
 
-def make_must_read(run_id="run-2026-02-10", pub_ids=None):
+def make_must_read(run_id="run-2026-02-10", pub_ids=None, use_id_key=False):
+    """Create a mock MustRead. Set use_id_key=True to mimic production format."""
     if pub_ids is None:
         pub_ids = ["pub-001", "pub-002", "pub-003"]
     mr = MagicMock(spec=MustRead)
     mr.run_id = run_id
     mr.mode = "tri-model-daily"
-    mr.must_reads_json = json.dumps([{"publication_id": pid} for pid in pub_ids])
+    if use_id_key:
+        # Production format: nested dict wrapper with "id" key
+        mr.must_reads_json = json.dumps({
+            "run_id": run_id,
+            "must_reads": [{"id": pid, "title": f"Paper {pid}"} for pid in pub_ids],
+        })
+    else:
+        # Simple format: flat list with "publication_id" key
+        mr.must_reads_json = json.dumps([{"publication_id": pid} for pid in pub_ids])
     mr.created_at = datetime(2026, 2, 10, 6, 0, 0)
     mr.updated_at = datetime(2026, 2, 10, 6, 0, 0)
     return mr
@@ -184,6 +193,40 @@ class TestDailyMustReads:
         assert data["note"] is not None
         assert "fewer than 5" in data["note"]
         assert len(data["papers"]) == 2
+
+    def test_production_format_nested_must_reads_with_id_key(self, client):
+        """Test the actual production format: nested dict wrapper + 'id' key."""
+        test_client, mock_db = client
+
+        run = make_run()
+        must_read = make_must_read(pub_ids=["pub-001", "pub-002"], use_id_key=True)
+        event1 = make_event(pub_id="pub-001", score=85.0, gpt_score=80)
+        event2 = make_event(pub_id="pub-002", score=75.0, gpt_score=70)
+        pub1 = make_publication(pub_id="pub-001")
+        pub2 = make_publication(pub_id="pub-002")
+
+        def side_effect_query(model):
+            m = MagicMock()
+            if model == Run:
+                m.filter.return_value.order_by.return_value.first.return_value = run
+            elif model == MustRead:
+                m.filter.return_value.first.return_value = must_read
+            elif model == TriModelEvent:
+                m.filter.return_value.all.return_value = [event1, event2]
+            elif model == Publication:
+                m.filter.return_value.all.return_value = [pub1, pub2]
+            return m
+
+        mock_db.query.side_effect = side_effect_query
+
+        response = test_client.get("/daily-must-reads?threshold=60", headers=API_KEY_HEADER)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["above_threshold"] == 2
+        assert len(data["papers"]) == 2
+        # Verify GPT score is now extracted (uses final_relevancy_score key)
+        assert data["papers"][0]["subscores"]["gpt_score"] == 80
+        assert data["papers"][1]["subscores"]["gpt_score"] == 70
 
 
 # ─── /weekly-must-reads ──────────────────────────────────────────────

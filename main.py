@@ -245,26 +245,36 @@ def safe_json_parse(json_str: Optional[str]) -> Optional[dict]:
         return None
 
 
+def _extract_score(review: Optional[dict]) -> Optional[float]:
+    """
+    Extract a relevancy score from a parsed LLM review dict.
+    Checks multiple possible key names used by different models.
+    """
+    if not review or not isinstance(review, dict):
+        return None
+    # Check keys in priority order — models use different naming conventions:
+    #   Claude/Gemini: relevancy_score, relevancy_score_0_100
+    #   GPT evaluator: final_relevancy_score
+    for key in ("relevancy_score", "relevancy_score_0_100", "final_relevancy_score", "score"):
+        val = review.get(key)
+        if val is not None:
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                continue
+    return None
+
+
 def extract_llm_subscores(event) -> dict:
     """
     Extract individual model relevancy scores from a TriModelEvent.
     Returns dict with claude_score, gemini_score, gpt_score keys.
     """
-    scores = {"claude_score": None, "gemini_score": None, "gpt_score": None}
-
-    claude_review = safe_json_parse(event.claude_review_json)
-    if claude_review and isinstance(claude_review, dict):
-        scores["claude_score"] = claude_review.get("relevancy_score") or claude_review.get("score")
-
-    gemini_review = safe_json_parse(event.gemini_review_json)
-    if gemini_review and isinstance(gemini_review, dict):
-        scores["gemini_score"] = gemini_review.get("relevancy_score") or gemini_review.get("score")
-
-    gpt_eval = safe_json_parse(event.gpt_eval_json)
-    if gpt_eval and isinstance(gpt_eval, dict):
-        scores["gpt_score"] = gpt_eval.get("relevancy_score") or gpt_eval.get("score")
-
-    return scores
+    return {
+        "claude_score": _extract_score(safe_json_parse(event.claude_review_json)),
+        "gemini_score": _extract_score(safe_json_parse(event.gemini_review_json)),
+        "gpt_score": _extract_score(safe_json_parse(event.gpt_eval_json)),
+    }
 
 
 def build_paper_detail(event, publication=None) -> dict:
@@ -1565,11 +1575,23 @@ async def get_daily_must_reads(
         )
 
     # Parse must-reads and extract publication IDs
-    must_reads_data = json.loads(must_read.must_reads_json)
+    # The JSON may be a flat list or a wrapper dict like:
+    #   {"run_id": "...", "must_reads": [{...}, ...]}
+    must_reads_raw = json.loads(must_read.must_reads_json)
+    if isinstance(must_reads_raw, dict) and "must_reads" in must_reads_raw:
+        must_reads_data = must_reads_raw["must_reads"]
+    elif isinstance(must_reads_raw, list):
+        must_reads_data = must_reads_raw
+    else:
+        must_reads_data = []
+
     pub_ids = []
     for item in must_reads_data:
-        if isinstance(item, dict) and "publication_id" in item:
-            pub_ids.append(item["publication_id"])
+        if isinstance(item, dict):
+            # Pipeline uses "id"; older format may use "publication_id"
+            pid = item.get("publication_id") or item.get("id")
+            if pid:
+                pub_ids.append(pid)
         elif isinstance(item, str):
             pub_ids.append(item)
 

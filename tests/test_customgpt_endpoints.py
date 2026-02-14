@@ -4,6 +4,8 @@ Tests for CustomGPT-facing API endpoints:
 - GET /weekly-must-reads
 - GET /stats
 - GET /whats-new
+
+All CustomGPT endpoints now read from the centralized publications table.
 """
 
 import os
@@ -18,7 +20,7 @@ os.environ.setdefault("DATABASE_URL", "postgresql://test:test@localhost/test")
 os.environ.setdefault("ACITRACK_API_KEY", "test-key")
 
 import main  # noqa: E402
-from db import Run, TriModelEvent, MustRead, Publication, PublicationEmbedding  # noqa: E402
+from db import Run, Publication, PublicationEmbedding  # noqa: E402
 
 
 API_KEY_HEADER = {"X-API-Key": "test-key"}
@@ -39,66 +41,48 @@ def make_run(run_id="run-2026-02-10", mode="tri-model-daily", started_at=None):
     return run
 
 
-def make_event(pub_id="pub-001", title="Test Paper", score=85.0, agreement="high",
-               claude_score=88, gemini_score=82, gpt_score=85, run_id="run-2026-02-10"):
-    event = MagicMock(spec=TriModelEvent)
-    event.id = 1
-    event.run_id = run_id
-    event.mode = "tri-model-daily"
-    event.publication_id = pub_id
-    event.title = title
-    event.agreement_level = agreement
-    event.disagreements = None
-    event.evaluator_rationale = "Highly relevant to ACI detection."
-    event.claude_review_json = json.dumps({"relevancy_score": claude_score, "summary": "Claude summary."})
-    event.gemini_review_json = json.dumps({"relevancy_score": gemini_score, "summary": "Gemini summary."})
-    event.gpt_eval_json = json.dumps({"final_relevancy_score": gpt_score, "final_summary": "GPT summary."})
-    event.final_relevancy_score = score
-    event.created_at = datetime(2026, 2, 10, 6, 0, 0)
-    return event
-
-
-def make_publication(pub_id="pub-001", title="Test Paper", url="https://pubmed.ncbi.nlm.nih.gov/12345/"):
+def make_pub(pub_id="pub-001", title="Test Paper", score=85, agreement="high",
+             claude_score=88, gemini_score=82, credibility_score=75,
+             url="https://pubmed.ncbi.nlm.nih.gov/12345/",
+             scoring_run_id="run-2026-02-10",
+             published_date="2026-02-09"):
+    """Create a mock Publication with centralized scoring columns."""
     pub = MagicMock(spec=Publication)
     pub.publication_id = pub_id
     pub.title = title
+    pub.authors = "Smith J, Doe A"
     pub.source = "Nature Medicine"
-    pub.published_date = datetime(2026, 2, 9)
+    pub.venue = "Nature Medicine"
+    pub.published_date = published_date
     pub.url = url
-    pub.latest_run_id = "run-2026-02-10"
-    pub.latest_relevancy_score = 85.0
-    pub.latest_credibility_score = None
+    pub.canonical_url = None
+    pub.doi = None
+    pub.pmid = "12345"
+    pub.source_type = "pubmed"
+    pub.raw_text = None
+    pub.summary = "Base summary."
+    pub.final_relevancy_score = score
+    pub.final_relevancy_reason = "Relevant to ACI detection."
+    pub.final_summary = "Tri-model synthesized summary."
+    pub.claude_score = claude_score
+    pub.gemini_score = gemini_score
+    pub.agreement_level = agreement
+    pub.confidence = "high"
+    pub.evaluator_rationale = "Highly relevant to ACI detection."
+    pub.disagreements = None
+    pub.final_signals_json = None
+    pub.credibility_score = credibility_score
+    pub.credibility_reason = "Peer-reviewed journal article with strong methodology."
+    pub.credibility_confidence = "high"
+    pub.credibility_signals_json = None
+    pub.scoring_run_id = scoring_run_id
+    pub.scoring_updated_at = None
+    pub.latest_run_id = scoring_run_id
+    pub.created_at = datetime(2026, 2, 10, 6, 0, 0)
+    pub.updated_at = datetime(2026, 2, 10, 6, 0, 0)
+    pub.latest_relevancy_score = score
+    pub.latest_credibility_score = credibility_score
     return pub
-
-
-def make_must_read(run_id="run-2026-02-10", pub_ids=None, use_id_key=False):
-    """Create a mock MustRead. Set use_id_key=True to mimic production format."""
-    if pub_ids is None:
-        pub_ids = ["pub-001", "pub-002", "pub-003"]
-    mr = MagicMock(spec=MustRead)
-    mr.run_id = run_id
-    mr.mode = "tri-model-daily"
-    if use_id_key:
-        # Production format: nested dict wrapper with "id" key
-        mr.must_reads_json = json.dumps({
-            "run_id": run_id,
-            "must_reads": [
-                {
-                    "id": pid,
-                    "title": f"Paper {pid}",
-                    "source": "Nature Medicine",
-                    "credibility_score": 75,
-                    "credibility_reason": "Peer-reviewed journal article with strong methodology.",
-                }
-                for pid in pub_ids
-            ],
-        })
-    else:
-        # Simple format: flat list with "publication_id" key
-        mr.must_reads_json = json.dumps([{"publication_id": pid} for pid in pub_ids])
-    mr.created_at = datetime(2026, 2, 10, 6, 0, 0)
-    mr.updated_at = datetime(2026, 2, 10, 6, 0, 0)
-    return mr
 
 
 @pytest.fixture
@@ -134,29 +118,17 @@ class TestDailyMustReads:
         test_client, mock_db = client
 
         run = make_run()
-        must_read = make_must_read(pub_ids=["pub-001", "pub-002"])
-        event_high = make_event(pub_id="pub-001", score=85.0)
-        event_low = make_event(pub_id="pub-002", score=40.0, title="Low Score Paper")
-        pub1 = make_publication(pub_id="pub-001")
-        pub2 = make_publication(pub_id="pub-002", title="Low Score Paper", url="https://example.com/2")
-
-        # Mock the chained queries
-        query_mock = MagicMock()
-        filter_mock = MagicMock()
+        pub_high = make_pub(pub_id="pub-001", score=85, claude_score=88, gemini_score=82)
+        pub_low = make_pub(pub_id="pub-002", title="Low Score Paper", score=40,
+                           claude_score=45, gemini_score=35)
 
         def side_effect_query(model):
             m = MagicMock()
-            if model == Run:
+            if model is Run:
                 m.filter.return_value.order_by.return_value.first.return_value = run
                 return m
-            elif model == MustRead:
-                m.filter.return_value.first.return_value = must_read
-                return m
-            elif model == TriModelEvent:
-                m.filter.return_value.all.return_value = [event_high, event_low]
-                return m
-            elif model == Publication:
-                m.filter.return_value.all.return_value = [pub1, pub2]
+            elif model is Publication:
+                m.filter.return_value.order_by.return_value.all.return_value = [pub_high, pub_low]
                 return m
             return m
 
@@ -176,22 +148,15 @@ class TestDailyMustReads:
         test_client, mock_db = client
 
         run = make_run()
-        must_read = make_must_read(pub_ids=["pub-001", "pub-002"])
-        event1 = make_event(pub_id="pub-001", score=85.0)
-        event2 = make_event(pub_id="pub-002", score=75.0)
-        pub1 = make_publication(pub_id="pub-001")
-        pub2 = make_publication(pub_id="pub-002")
+        pub1 = make_pub(pub_id="pub-001", score=85)
+        pub2 = make_pub(pub_id="pub-002", score=75)
 
         def side_effect_query(model):
             m = MagicMock()
-            if model == Run:
+            if model is Run:
                 m.filter.return_value.order_by.return_value.first.return_value = run
-            elif model == MustRead:
-                m.filter.return_value.first.return_value = must_read
-            elif model == TriModelEvent:
-                m.filter.return_value.all.return_value = [event1, event2]
-            elif model == Publication:
-                m.filter.return_value.all.return_value = [pub1, pub2]
+            elif model is Publication:
+                m.filter.return_value.order_by.return_value.all.return_value = [pub1, pub2]
             return m
 
         mock_db.query.side_effect = side_effect_query
@@ -203,27 +168,19 @@ class TestDailyMustReads:
         assert "fewer than 5" in data["note"]
         assert len(data["papers"]) == 2
 
-    def test_production_format_nested_must_reads_with_id_key(self, client):
-        """Test the actual production format: nested dict wrapper + 'id' key."""
+    def test_credibility_data_flows_through(self, client):
+        """Credibility data now comes from publications table directly."""
         test_client, mock_db = client
 
         run = make_run()
-        must_read = make_must_read(pub_ids=["pub-001", "pub-002"], use_id_key=True)
-        event1 = make_event(pub_id="pub-001", score=85.0, gpt_score=80)
-        event2 = make_event(pub_id="pub-002", score=75.0, gpt_score=70)
-        pub1 = make_publication(pub_id="pub-001")
-        pub2 = make_publication(pub_id="pub-002")
+        pub1 = make_pub(pub_id="pub-001", score=85, credibility_score=75)
 
         def side_effect_query(model):
             m = MagicMock()
-            if model == Run:
+            if model is Run:
                 m.filter.return_value.order_by.return_value.first.return_value = run
-            elif model == MustRead:
-                m.filter.return_value.first.return_value = must_read
-            elif model == TriModelEvent:
-                m.filter.return_value.all.return_value = [event1, event2]
-            elif model == Publication:
-                m.filter.return_value.all.return_value = [pub1, pub2]
+            elif model is Publication:
+                m.filter.return_value.order_by.return_value.all.return_value = [pub1]
             return m
 
         mock_db.query.side_effect = side_effect_query
@@ -231,12 +188,6 @@ class TestDailyMustReads:
         response = test_client.get("/daily-must-reads?threshold=60", headers=API_KEY_HEADER)
         assert response.status_code == 200
         data = response.json()
-        assert data["above_threshold"] == 2
-        assert len(data["papers"]) == 2
-        # Verify GPT score is now extracted (uses final_relevancy_score key)
-        assert data["papers"][0]["subscores"]["gpt_score"] == 80
-        assert data["papers"][1]["subscores"]["gpt_score"] == 70
-        # Verify credibility data flows from must-reads JSON
         assert data["papers"][0]["credibility_score"] == 75
         assert data["papers"][0]["credibility_reason"] == "Peer-reviewed journal article with strong methodology."
 
@@ -250,42 +201,20 @@ class TestWeeklyMustReads:
         response = test_client.get("/weekly-must-reads")
         assert response.status_code == 401
 
-    def test_returns_top_papers_with_credibility(self, client):
+    def test_returns_top_papers(self, client):
         test_client, mock_db = client
 
-        event1 = make_event(pub_id="pub-001", score=95.0, run_id="run-2026-02-10")
-        event2 = make_event(pub_id="pub-002", score=88.0, title="Second Paper", run_id="run-2026-02-10")
-        pub1 = make_publication(pub_id="pub-001")
-        pub2 = make_publication(pub_id="pub-002", title="Second Paper")
-        must_read = make_must_read(
-            run_id="run-2026-02-10",
-            pub_ids=["pub-001", "pub-002"],
-            use_id_key=True,
-        )
+        pub1 = make_pub(pub_id="pub-001", score=95, credibility_score=80)
+        pub2 = make_pub(pub_id="pub-002", score=88, title="Second Paper")
 
-        # Use a flexible chainable mock that returns sensible defaults
         chain_mock = MagicMock()
-        # Make all chain methods return the same mock for flexibility
         chain_mock.filter.return_value = chain_mock
-        chain_mock.group_by.return_value = chain_mock
-        chain_mock.join.return_value = chain_mock
         chain_mock.order_by.return_value = chain_mock
         chain_mock.limit.return_value = chain_mock
-        chain_mock.subquery.return_value = MagicMock()
-        chain_mock.all.return_value = [event1, event2]
-        chain_mock.scalar.return_value = 42.0
-
-        pub_mock = MagicMock()
-        pub_mock.filter.return_value.all.return_value = [pub1, pub2]
-
-        mr_mock = MagicMock()
-        mr_mock.filter.return_value.all.return_value = [must_read]
+        chain_mock.all.return_value = [pub1, pub2]
+        chain_mock.scalar.return_value = 42
 
         def side_effect_query(*args):
-            if len(args) == 1 and args[0] is Publication:
-                return pub_mock
-            if len(args) == 1 and args[0] is MustRead:
-                return mr_mock
             return chain_mock
 
         mock_db.query.side_effect = side_effect_query
@@ -296,20 +225,15 @@ class TestWeeklyMustReads:
         assert "papers" in data
         assert "period" in data
         assert data["period"]["days"] == 7
-        # Verify credibility data flows through from must-reads
-        assert data["papers"][0]["credibility_score"] == 75
-        assert data["papers"][0]["credibility_reason"] == "Peer-reviewed journal article with strong methodology."
+        assert data["papers"][0]["credibility_score"] == 80
 
     def test_empty_period(self, client):
         test_client, mock_db = client
 
         chain_mock = MagicMock()
         chain_mock.filter.return_value = chain_mock
-        chain_mock.group_by.return_value = chain_mock
-        chain_mock.join.return_value = chain_mock
         chain_mock.order_by.return_value = chain_mock
         chain_mock.limit.return_value = chain_mock
-        chain_mock.subquery.return_value = MagicMock()
         chain_mock.all.return_value = []
         chain_mock.scalar.return_value = 0
 
@@ -339,7 +263,6 @@ class TestStats:
 
         run = make_run()
 
-        # Flexible chainable mock
         chain_mock = MagicMock()
         chain_mock.filter.return_value = chain_mock
         chain_mock.order_by.return_value = chain_mock
@@ -383,29 +306,20 @@ class TestWhatsNew:
         test_client, mock_db = client
 
         run = make_run()
-        events = [
-            make_event(pub_id="pub-001", score=95.0, agreement="high"),
-            make_event(pub_id="pub-002", score=80.0, agreement="high", title="Paper 2"),
-            make_event(pub_id="pub-003", score=45.0, agreement="low", title="Paper 3",
-                       claude_score=70, gemini_score=30, gpt_score=35),
-            make_event(pub_id="pub-004", score=30.0, agreement="moderate", title="Paper 4"),
-        ]
         pubs = [
-            make_publication(pub_id="pub-001"),
-            make_publication(pub_id="pub-002", title="Paper 2", url="https://example.com/2"),
-            make_publication(pub_id="pub-003", title="Paper 3", url="https://example.com/3"),
-            make_publication(pub_id="pub-004", title="Paper 4", url="https://example.com/4"),
+            make_pub(pub_id="pub-001", score=95, agreement="high"),
+            make_pub(pub_id="pub-002", score=80, title="Paper 2", agreement="high"),
+            make_pub(pub_id="pub-003", score=45, title="Paper 3", agreement="low",
+                     claude_score=70, gemini_score=30),
+            make_pub(pub_id="pub-004", score=30, title="Paper 4", agreement="moderate"),
         ]
 
         def side_effect_query(model):
             m = MagicMock()
-            if model == Run:
+            if model is Run:
                 m.filter.return_value.order_by.return_value.first.return_value = run
                 return m
-            elif model == TriModelEvent:
-                m.filter.return_value.all.return_value = events
-                return m
-            elif model == Publication:
+            elif model is Publication:
                 m.filter.return_value.all.return_value = pubs
                 return m
             return m
@@ -423,7 +337,7 @@ class TestWhatsNew:
         assert data["summary"]["low_agreement_count"] == 1
 
         assert len(data["top_papers"]) <= 5
-        assert data["top_papers"][0]["final_relevancy_score"] == 95.0
+        assert data["top_papers"][0]["final_relevancy_score"] == 95
 
         assert len(data["high_agreement_highlights"]) <= 3
 

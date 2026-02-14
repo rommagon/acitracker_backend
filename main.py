@@ -282,6 +282,8 @@ def build_paper_detail(event, publication=None, must_read_item=None) -> dict:
     Build a detailed paper dict from a TriModelEvent and optional Publication.
     If must_read_item (dict from must_reads_json) is provided, it enriches
     the result with credibility data and fills in any missing metadata.
+
+    LEGACY: used by non-CustomGPT endpoints that still read tri_model_events.
     """
     subscores = extract_llm_subscores(event)
     summary = extract_summary(
@@ -328,6 +330,50 @@ def build_paper_detail(event, publication=None, must_read_item=None) -> dict:
     }
 
     return result
+
+
+def _best_link(pub) -> Optional[str]:
+    """Return the best available URL for a Publication row (fallback chain)."""
+    if pub.canonical_url:
+        return pub.canonical_url
+    if pub.url:
+        return pub.url
+    if pub.doi:
+        return f"https://doi.org/{pub.doi}"
+    if pub.pmid:
+        return f"https://pubmed.ncbi.nlm.nih.gov/{pub.pmid}/"
+    return None
+
+
+def build_paper_detail_from_pub(pub) -> dict:
+    """
+    Build a detailed paper dict directly from a Publication row.
+    Uses the centralized publications table — no joins needed.
+    """
+    return {
+        "publication_id": pub.publication_id,
+        "title": pub.title,
+        "authors": pub.authors,
+        "url": _best_link(pub),
+        "source": pub.source,
+        "venue": pub.venue,
+        "published_date": pub.published_date,
+        "source_type": pub.source_type,
+        "final_relevancy_score": pub.final_relevancy_score,
+        "final_relevancy_reason": pub.final_relevancy_reason,
+        "agreement_level": pub.agreement_level,
+        "confidence": pub.confidence,
+        "disagreements": pub.disagreements,
+        "evaluator_rationale": pub.evaluator_rationale,
+        "summary": pub.final_summary or pub.summary,
+        "subscores": {
+            "claude_score": pub.claude_score,
+            "gemini_score": pub.gemini_score,
+        },
+        "credibility_score": pub.credibility_score,
+        "credibility_reason": pub.credibility_reason,
+        "credibility_confidence": pub.credibility_confidence,
+    }
 
 
 @app.get("/feedback", response_class=HTMLResponse)
@@ -1571,10 +1617,9 @@ async def get_daily_must_reads(
     api_key: Optional[str] = Depends(verify_api_key),
 ):
     """
-    Get today's must-read papers from the latest daily run, enriched with
-    publication URLs, LLM subscores, and summaries. Papers below the
-    threshold are excluded. A note is included when fewer than 5 papers
-    meet the threshold.
+    Get today's must-read papers from the latest daily run.
+    Reads directly from the centralized publications table.
+    Papers below the threshold are excluded.
     """
     # Get latest daily run
     run = db.query(Run).filter(
@@ -1584,40 +1629,13 @@ async def get_daily_must_reads(
     if not run:
         raise HTTPException(status_code=404, detail="No daily runs found")
 
-    # Get must-reads for this run
-    must_read = db.query(MustRead).filter(MustRead.run_id == run.run_id).first()
-    if not must_read:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No must-reads found for run_id={run.run_id}"
-        )
+    # Query publications scored in this run
+    pubs = db.query(Publication).filter(
+        Publication.scoring_run_id == run.run_id,
+        Publication.final_relevancy_score.isnot(None),
+    ).order_by(desc(Publication.final_relevancy_score)).all()
 
-    # Parse must-reads and extract publication IDs
-    # The JSON may be a flat list or a wrapper dict like:
-    #   {"run_id": "...", "must_reads": [{...}, ...]}
-    must_reads_raw = json.loads(must_read.must_reads_json)
-    if isinstance(must_reads_raw, dict) and "must_reads" in must_reads_raw:
-        must_reads_data = must_reads_raw["must_reads"]
-    elif isinstance(must_reads_raw, list):
-        must_reads_data = must_reads_raw
-    else:
-        must_reads_data = []
-
-    # Build lookup of must-reads items keyed by publication id
-    # (these contain credibility data, source, etc. from the pipeline)
-    pub_ids = []
-    mr_items_by_id = {}
-    for item in must_reads_data:
-        if isinstance(item, dict):
-            # Pipeline uses "id"; older format may use "publication_id"
-            pid = item.get("publication_id") or item.get("id")
-            if pid:
-                pub_ids.append(pid)
-                mr_items_by_id[pid] = item
-        elif isinstance(item, str):
-            pub_ids.append(item)
-
-    if not pub_ids:
+    if not pubs:
         return {
             "run_id": run.run_id,
             "mode": run.mode,
@@ -1626,37 +1644,18 @@ async def get_daily_must_reads(
             "total_must_reads": 0,
             "above_threshold": 0,
             "below_threshold_count": 0,
-            "note": "No must-read publications found for this run.",
+            "note": "No scored publications found for this run.",
             "papers": [],
         }
 
-    # Fetch events and publications
-    events = db.query(TriModelEvent).filter(
-        TriModelEvent.run_id == run.run_id,
-        TriModelEvent.publication_id.in_(pub_ids),
-    ).all()
-
-    publications = {
-        p.publication_id: p
-        for p in db.query(Publication).filter(
-            Publication.publication_id.in_(pub_ids)
-        ).all()
-    }
-
-    # Build results with threshold filter
+    # Apply threshold filter
     papers = []
     below_count = 0
-    for event in events:
-        pub = publications.get(event.publication_id)
-        mr_item = mr_items_by_id.get(event.publication_id)
-        detail = build_paper_detail(event, pub, must_read_item=mr_item)
-
-        if event.final_relevancy_score is not None and event.final_relevancy_score >= threshold:
-            papers.append(detail)
+    for pub in pubs:
+        if pub.final_relevancy_score is not None and pub.final_relevancy_score >= threshold:
+            papers.append(build_paper_detail_from_pub(pub))
         else:
             below_count += 1
-
-    papers.sort(key=lambda x: x["final_relevancy_score"] or 0, reverse=True)
 
     note = None
     if len(papers) < 5:
@@ -1670,7 +1669,7 @@ async def get_daily_must_reads(
         "mode": run.mode,
         "run_date": run.started_at.isoformat() if run.started_at else None,
         "threshold": threshold,
-        "total_must_reads": len(events),
+        "total_must_reads": len(pubs),
         "above_threshold": len(papers),
         "below_threshold_count": below_count,
         "note": note,
@@ -1688,95 +1687,42 @@ async def get_weekly_must_reads(
 ):
     """
     Get the top N highest-scored papers from the past N days.
-    Deduplicates by publication_id and returns enriched details
-    with URLs, LLM subscores, and summaries.
+    Reads directly from the centralized publications table.
     """
-    cutoff = datetime.utcnow() - timedelta(days=days)
+    cutoff_date = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
 
-    # Get the best score per publication in the window
-    subq = db.query(
-        TriModelEvent.publication_id,
-        func.max(TriModelEvent.final_relevancy_score).label("best_score"),
-    ).filter(
-        TriModelEvent.created_at >= cutoff,
-        TriModelEvent.final_relevancy_score.isnot(None),
-    ).group_by(
-        TriModelEvent.publication_id,
-    ).subquery()
-
-    # Join back to get full event rows
-    events = db.query(TriModelEvent).join(
-        subq,
-        and_(
-            TriModelEvent.publication_id == subq.c.publication_id,
-            TriModelEvent.final_relevancy_score == subq.c.best_score,
-        ),
-    ).filter(
-        TriModelEvent.created_at >= cutoff,
+    # Query publications with scores, published in the window
+    pubs = db.query(Publication).filter(
+        Publication.published_date >= cutoff_date,
+        Publication.final_relevancy_score.isnot(None),
     ).order_by(
-        desc(TriModelEvent.final_relevancy_score),
+        desc(Publication.final_relevancy_score),
     ).limit(top_n).all()
 
-    # Batch fetch publications
-    pub_ids = [e.publication_id for e in events]
-    publications = {
-        p.publication_id: p
-        for p in db.query(Publication).filter(
-            Publication.publication_id.in_(pub_ids)
-        ).all()
-    } if pub_ids else {}
+    papers = [build_paper_detail_from_pub(pub) for pub in pubs]
 
-    # Build must-reads lookup for credibility enrichment
-    # Gather all run_ids from the events, then load their must-reads
-    mr_items_by_id = {}
-    if pub_ids:
-        run_ids = list({e.run_id for e in events})
-        must_reads = db.query(MustRead).filter(
-            MustRead.run_id.in_(run_ids)
-        ).all()
-        for mr in must_reads:
-            try:
-                mr_raw = json.loads(mr.must_reads_json)
-                if isinstance(mr_raw, dict) and "must_reads" in mr_raw:
-                    mr_list = mr_raw["must_reads"]
-                elif isinstance(mr_raw, list):
-                    mr_list = mr_raw
-                else:
-                    mr_list = []
-                for item in mr_list:
-                    if isinstance(item, dict):
-                        pid = item.get("publication_id") or item.get("id")
-                        if pid and pid not in mr_items_by_id:
-                            mr_items_by_id[pid] = item
-            except (json.JSONDecodeError, TypeError):
-                continue
-
-    papers = []
-    for event in events:
-        pub = publications.get(event.publication_id)
-        mr_item = mr_items_by_id.get(event.publication_id)
-        papers.append(build_paper_detail(event, pub, must_read_item=mr_item))
-
-    # Week stats
-    total_scored_this_period = db.query(func.count(TriModelEvent.id)).filter(
-        TriModelEvent.created_at >= cutoff,
+    # Period stats
+    total_scored = db.query(func.count(Publication.publication_id)).filter(
+        Publication.published_date >= cutoff_date,
+        Publication.final_relevancy_score.isnot(None),
     ).scalar() or 0
 
-    avg_score_this_period = db.query(
-        func.avg(TriModelEvent.final_relevancy_score),
+    avg_score = db.query(
+        func.avg(Publication.final_relevancy_score),
     ).filter(
-        TriModelEvent.created_at >= cutoff,
-        TriModelEvent.final_relevancy_score.isnot(None),
+        Publication.published_date >= cutoff_date,
+        Publication.final_relevancy_score.isnot(None),
     ).scalar()
 
+    now = datetime.utcnow()
     return {
         "period": {
-            "from": cutoff.isoformat(),
-            "to": datetime.utcnow().isoformat(),
+            "from": cutoff_date,
+            "to": now.strftime("%Y-%m-%d"),
             "days": days,
         },
-        "total_scored_this_period": total_scored_this_period,
-        "average_score_this_period": round(float(avg_score_this_period), 1) if avg_score_this_period else None,
+        "total_scored_this_period": total_scored,
+        "average_score_this_period": round(float(avg_score), 1) if avg_score else None,
         "top_n": top_n,
         "papers": papers,
     }
@@ -1791,20 +1737,27 @@ async def get_stats(
     """
     Aggregate statistics about Science Agent: publication counts,
     scoring distributions, embedding coverage, and system metrics.
+    Reads from the centralized publications table.
     """
     now = datetime.utcnow()
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    week_start = today_start - timedelta(days=7)
+    today_str = now.strftime("%Y-%m-%d")
+    week_ago_str = (now - timedelta(days=7)).strftime("%Y-%m-%d")
 
-    # Core counts
+    # Core counts from publications table
     total_publications = db.query(func.count(Publication.publication_id)).scalar() or 0
-    total_scored = db.query(func.count(TriModelEvent.id)).scalar() or 0
-    unique_scored = db.query(func.count(func.distinct(TriModelEvent.publication_id))).scalar() or 0
-    scored_today = db.query(func.count(TriModelEvent.id)).filter(
-        TriModelEvent.created_at >= today_start,
+
+    scored_pubs = db.query(func.count(Publication.publication_id)).filter(
+        Publication.final_relevancy_score.isnot(None),
     ).scalar() or 0
-    scored_this_week = db.query(func.count(TriModelEvent.id)).filter(
-        TriModelEvent.created_at >= week_start,
+
+    scored_today = db.query(func.count(Publication.publication_id)).filter(
+        Publication.published_date == today_str,
+        Publication.final_relevancy_score.isnot(None),
+    ).scalar() or 0
+
+    scored_this_week = db.query(func.count(Publication.publication_id)).filter(
+        Publication.published_date >= week_ago_str,
+        Publication.final_relevancy_score.isnot(None),
     ).scalar() or 0
 
     # Latest run info
@@ -1827,34 +1780,36 @@ async def get_stats(
     total_embeddings = db.query(func.count(PublicationEmbedding.publication_id)).filter(
         PublicationEmbedding.embedding.isnot(None),
     ).scalar() or 0
-    embedding_coverage_pct = round(100 * total_embeddings / unique_scored, 1) if unique_scored > 0 else 0
+    embedding_coverage_pct = round(100 * total_embeddings / scored_pubs, 1) if scored_pubs > 0 else 0
 
-    # Agreement distribution
+    # Agreement distribution from publications table
     agreement_rows = db.query(
-        TriModelEvent.agreement_level,
-        func.count(TriModelEvent.id),
-    ).group_by(TriModelEvent.agreement_level).all()
+        Publication.agreement_level,
+        func.count(Publication.publication_id),
+    ).filter(
+        Publication.agreement_level.isnot(None),
+    ).group_by(Publication.agreement_level).all()
     agreement_distribution = {row[0] or "unknown": row[1] for row in agreement_rows}
 
     # Average relevancy score
     avg_relevancy = db.query(
-        func.avg(TriModelEvent.final_relevancy_score),
+        func.avg(Publication.final_relevancy_score),
     ).filter(
-        TriModelEvent.final_relevancy_score.isnot(None),
+        Publication.final_relevancy_score.isnot(None),
     ).scalar()
 
     # Score distribution buckets
     score_buckets_rows = db.query(
         case(
-            (TriModelEvent.final_relevancy_score < 20, "0-19"),
-            (TriModelEvent.final_relevancy_score < 40, "20-39"),
-            (TriModelEvent.final_relevancy_score < 60, "40-59"),
-            (TriModelEvent.final_relevancy_score < 80, "60-79"),
+            (Publication.final_relevancy_score < 20, "0-19"),
+            (Publication.final_relevancy_score < 40, "20-39"),
+            (Publication.final_relevancy_score < 60, "40-59"),
+            (Publication.final_relevancy_score < 80, "60-79"),
             else_="80-100",
         ).label("bucket"),
-        func.count(TriModelEvent.id),
+        func.count(Publication.publication_id),
     ).filter(
-        TriModelEvent.final_relevancy_score.isnot(None),
+        Publication.final_relevancy_score.isnot(None),
     ).group_by("bucket").all()
     score_distribution = {row[0]: row[1] for row in score_buckets_rows}
 
@@ -1865,8 +1820,7 @@ async def get_stats(
         "generated_at": now.isoformat(),
         "publications": {
             "total_found": total_publications,
-            "total_scored": total_scored,
-            "unique_scored": unique_scored,
+            "total_scored": scored_pubs,
             "scored_today": scored_today,
             "scored_this_week": scored_this_week,
         },
@@ -1895,6 +1849,7 @@ async def get_whats_new(
     """
     Quick daily report about the latest run: how many papers were found,
     top papers, high-agreement highlights, and notable disagreements.
+    Reads directly from the centralized publications table.
     """
     # Latest daily run
     run = db.query(Run).filter(
@@ -1904,60 +1859,44 @@ async def get_whats_new(
     if not run:
         raise HTTPException(status_code=404, detail="No daily runs found")
 
-    # All events for this run
-    events = db.query(TriModelEvent).filter(
-        TriModelEvent.run_id == run.run_id,
+    # All publications scored in this run
+    pubs = db.query(Publication).filter(
+        Publication.scoring_run_id == run.run_id,
     ).all()
 
-    if not events:
+    if not pubs:
         raise HTTPException(
             status_code=404,
-            detail=f"No events found for run_id={run.run_id}",
+            detail=f"No publications found for run_id={run.run_id}",
         )
 
-    # Batch fetch publications
-    pub_ids = [e.publication_id for e in events]
-    publications = {
-        p.publication_id: p
-        for p in db.query(Publication).filter(
-            Publication.publication_id.in_(pub_ids)
-        ).all()
-    }
-
     # Compute analytics
-    scored_events = [e for e in events if e.final_relevancy_score is not None]
-    high_scoring = [e for e in scored_events if e.final_relevancy_score >= 60]
-    high_agreement = [e for e in events if e.agreement_level == "high"]
-    low_agreement = [e for e in events if e.agreement_level == "low"]
+    scored_pubs = [p for p in pubs if p.final_relevancy_score is not None]
+    high_scoring = [p for p in scored_pubs if p.final_relevancy_score >= 60]
+    high_agreement = [p for p in pubs if p.agreement_level == "high"]
+    low_agreement = [p for p in pubs if p.agreement_level == "low"]
 
     avg_score = (
-        sum(e.final_relevancy_score for e in scored_events) / len(scored_events)
-        if scored_events else None
+        sum(p.final_relevancy_score for p in scored_pubs) / len(scored_pubs)
+        if scored_pubs else None
     )
 
     # Top 5 papers by score
-    sorted_events = sorted(scored_events, key=lambda e: e.final_relevancy_score or 0, reverse=True)
-    top_papers = [
-        build_paper_detail(e, publications.get(e.publication_id))
-        for e in sorted_events[:5]
-    ]
+    sorted_pubs = sorted(scored_pubs, key=lambda p: p.final_relevancy_score or 0, reverse=True)
+    top_papers = [build_paper_detail_from_pub(p) for p in sorted_pubs[:5]]
 
     # High agreement highlights (top 3 by score among high-agreement)
     high_agreement_sorted = sorted(
-        high_agreement, key=lambda e: e.final_relevancy_score or 0, reverse=True,
+        high_agreement, key=lambda p: p.final_relevancy_score or 0, reverse=True,
     )
-    high_agreement_papers = [
-        build_paper_detail(e, publications.get(e.publication_id))
-        for e in high_agreement_sorted[:3]
-    ]
+    high_agreement_papers = [build_paper_detail_from_pub(p) for p in high_agreement_sorted[:3]]
 
     # Notable disagreements (top 3 by score delta among low-agreement)
     disagreement_papers = []
-    for event in low_agreement:
-        subscores = extract_llm_subscores(event)
-        score_values = [v for v in subscores.values() if v is not None]
-        delta = (max(score_values) - min(score_values)) if len(score_values) >= 2 else 0
-        detail = build_paper_detail(event, publications.get(event.publication_id))
+    for pub in low_agreement:
+        scores = [s for s in [pub.claude_score, pub.gemini_score] if s is not None]
+        delta = (max(scores) - min(scores)) if len(scores) >= 2 else 0
+        detail = build_paper_detail_from_pub(pub)
         detail["max_score_delta"] = round(delta, 1) if delta else 0
         disagreement_papers.append(detail)
 
@@ -1976,7 +1915,7 @@ async def get_whats_new(
         },
         "run_counts": counts,
         "summary": {
-            "total_papers_scored": len(scored_events),
+            "total_papers_scored": len(scored_pubs),
             "papers_above_60": len(high_scoring),
             "average_score": round(avg_score, 1) if avg_score else None,
             "high_agreement_count": len(high_agreement),

@@ -175,24 +175,55 @@ class WeeklyDigestFeedback(Base):
 
 class Publication(Base):
     """
-    Canonical publications table - one row per unique publication.
-    Stores core metadata that doesn't change across runs.
+    Centralized publications table - single source of truth for all publication data.
+    All scoring, credibility, and metadata live here. No joins needed.
     """
     __tablename__ = "publications"
 
+    # ── Metadata ──
     publication_id = Column(String, primary_key=True, index=True)
     title = Column(Text, nullable=False)
-    source = Column(String, nullable=True)  # Journal/source name
-    published_date = Column(DateTime, nullable=True)
-    url = Column(Text, nullable=True)  # Link to publication
+    authors = Column(Text, nullable=True)  # Comma-separated
+    source = Column(String, nullable=True)  # Source feed name
+    venue = Column(String, nullable=True)  # Journal/venue name
+    published_date = Column(String, nullable=True)  # ISO 8601 date string
+    url = Column(Text, nullable=True)  # Original URL
+    canonical_url = Column(Text, nullable=True)  # Resolved canonical URL
+    doi = Column(String, nullable=True)
+    pmid = Column(String, nullable=True)  # PubMed ID
+    source_type = Column(String, nullable=True)  # pubmed, rss, biorxiv, etc.
+    raw_text = Column(Text, nullable=True)  # Full abstract/text
+    summary = Column(Text, nullable=True)  # Base summary
 
-    # Denormalized latest run info for quick access
+    # ── Scoring (centralized) ──
+    final_relevancy_score = Column(Integer, nullable=True)  # 0-100
+    final_relevancy_reason = Column(Text, nullable=True)
+    final_summary = Column(Text, nullable=True)  # Tri-model synthesized summary
+    claude_score = Column(Integer, nullable=True)
+    gemini_score = Column(Integer, nullable=True)
+    agreement_level = Column(String, nullable=True)  # high / moderate / low
+    confidence = Column(String, nullable=True)
+    evaluator_rationale = Column(Text, nullable=True)
+    disagreements = Column(Text, nullable=True)
+    final_signals_json = Column(Text, nullable=True)  # JSON blob
+
+    # ── Credibility ──
+    credibility_score = Column(Integer, nullable=True)  # 0-100
+    credibility_reason = Column(Text, nullable=True)
+    credibility_confidence = Column(String, nullable=True)  # low / medium / high
+    credibility_signals_json = Column(Text, nullable=True)  # JSON blob
+
+    # ── Audit ──
+    scoring_run_id = Column(String, nullable=True)  # Pipeline run that scored
+    scoring_updated_at = Column(DateTime, nullable=True)
     latest_run_id = Column(String, nullable=True, index=True)
-    latest_relevancy_score = Column(Float, nullable=True)
-    latest_credibility_score = Column(Float, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    # ── Kept for backward compat (used by existing ingest endpoint) ──
+    latest_relevancy_score = Column(Float, nullable=True)
+    latest_credibility_score = Column(Float, nullable=True)
 
 
 # Embedding dimension for text-embedding-3-small
